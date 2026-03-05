@@ -266,6 +266,9 @@ Global `~/.codex/AGENTS.md` applies to all projects. Project-level `./AGENTS.md`
 | `index` | Chunk markdown into FTS5 with BM25 ranking. | 60 KB → 40 B |
 | `search` | Query indexed content with multiple queries in one call. | On-demand retrieval |
 | `fetch_and_index` | Fetch URL, detect content type (HTML/JSON/text), chunk and index. | 60 KB → 40 B |
+| `stats` | Show context savings, call counts, and session statistics. | — |
+| `doctor` | Diagnose installation: runtimes, hooks, FTS5, versions. | — |
+| `upgrade` | Upgrade to latest version from GitHub, rebuild, reconfigure hooks. | — |
 
 ## How the Sandbox Works
 
@@ -400,17 +403,15 @@ Detailed event data is also indexed into FTS5 for on-demand retrieval via `searc
 
 ## Utility Commands
 
-Three built-in commands work across **all platforms** — no Skills required:
+The `stats`, `doctor`, and `upgrade` MCP tools (listed in the Tools table above) double as utility commands. Type any of these to invoke them:
 
-| Command | What it does | How it works |
-|---------|-------------|--------------|
-| `ctx stats` | Show context savings and session continuity report | Calls `stats` MCP tool directly |
-| `ctx doctor` | Diagnose installation (runtimes, hooks, FTS5) | Meta-tool returns shell command to execute |
-| `ctx upgrade` | Upgrade to latest version from GitHub | Meta-tool returns shell command to execute |
+```
+ctx stats    ctx-stats    /ctx-stats
+ctx doctor   ctx-doctor   /ctx-doctor
+ctx upgrade  ctx-upgrade  /ctx-upgrade
+```
 
-On Claude Code, these also work as slash commands: `/ctx-stats`, `/ctx-doctor`, `/ctx-upgrade`.
-
-On other platforms (Gemini CLI, VS Code Copilot, OpenCode, Codex), just type the command name (e.g., "ctx stats") and the LLM will invoke the corresponding MCP tool.
+Works on **all platforms**. On Claude Code, slash command variants (`/ctx-stats`) are also available via Skills.
 
 ## Benchmarks
 

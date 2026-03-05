@@ -14,6 +14,20 @@ context-mode supports five platforms across three hook paradigms:
 
 The MCP server layer is 100% portable and needs no adapter. Only the hook layer requires platform-specific adapters.
 
+## Prerequisites
+
+All platforms (except Claude Code plugin install) require a global install:
+
+```bash
+npm install -g context-mode
+```
+
+This puts the `context-mode` binary in PATH, which is required for:
+- **MCP server:** `"command": "context-mode"` (replaces ephemeral `npx -y context-mode`)
+- **Hook dispatcher:** `context-mode hook <platform> <event>` (replaces `node ./node_modules/...` paths)
+- **Utility commands:** `context-mode doctor`, `context-mode upgrade`
+- **Persistent upgrades:** `ctx-upgrade` updates the global binary in-place
+
 ---
 
 ## Main Comparison Table
@@ -33,8 +47,10 @@ The MCP server layer is 100% portable and needs no adapter. Only the hook layer 
 | **Session ID field** | `session_id` | `session_id` | `sessionID` (camelCase) | N/A | `sessionId` (camelCase) |
 | **Project dir env** | `CLAUDE_PROJECT_DIR` | `GEMINI_PROJECT_DIR` | `ctx.directory` (plugin init) | N/A | `CLAUDE_PROJECT_DIR` |
 | **MCP tool naming** | `mcp__server__tool` | `mcp__server__tool` | `mcp__server__tool` | `mcp__server__tool` | `f1e_` prefix |
+| **Hook command format** | `context-mode hook claude-code <event>` | `context-mode hook gemini-cli <event>` | TS plugin (no command) | N/A | `context-mode hook vscode-copilot <event>` |
 | **Hook registration** | settings.json hooks object | settings.json hooks object | opencode.json plugin array | N/A | .github/hooks/*.json |
-| **Plugin distribution** | Claude plugin registry | Extension cache | npm package | N/A | VS Code Marketplace |
+| **MCP server command** | `context-mode` (or plugin auto) | `context-mode` | `context-mode` | `context-mode` | `context-mode` |
+| **Plugin distribution** | Claude plugin registry | npm global | npm global | npm global | npm global |
 | **Session dir** | `~/.claude/context-mode/sessions/` | `~/.gemini/context-mode/sessions/` | `~/.config/opencode/context-mode/sessions/` | `~/.codex/context-mode/sessions/` | `.github/context-mode/sessions/` or `~/.vscode/context-mode/sessions/` |
 
 ### Legend
@@ -74,6 +90,15 @@ Claude Code is the primary platform for context-mode. All hooks communicate via 
 3. `CLAUDE_SESSION_ID` environment variable
 4. Parent process ID fallback
 
+**Hook Commands:**
+```
+context-mode hook claude-code pretooluse
+context-mode hook claude-code posttooluse
+context-mode hook claude-code precompact
+context-mode hook claude-code sessionstart
+context-mode hook claude-code userpromptsubmit
+```
+
 **Known Issues:** None significant.
 
 ---
@@ -101,6 +126,14 @@ Gemini CLI uses the same JSON stdin/stdout paradigm as Claude Code but with diff
 **Environment Variables:**
 - `GEMINI_PROJECT_DIR` -- primary project directory
 - `CLAUDE_PROJECT_DIR` -- alias (also works)
+
+**Hook Commands:**
+```
+context-mode hook gemini-cli beforetool
+context-mode hook gemini-cli aftertool
+context-mode hook gemini-cli precompress
+context-mode hook gemini-cli sessionstart
+```
 
 **Known Issues / Caveats:**
 - `PreCompress` is advisory only (async, cannot block)
@@ -217,6 +250,14 @@ VS Code Copilot uses the same JSON stdin/stdout paradigm as Claude Code with Pas
 - `VSCODE_PID` environment variable
 - `TERM_PROGRAM=vscode`
 
+**Hook Commands:**
+```
+context-mode hook vscode-copilot pretooluse
+context-mode hook vscode-copilot posttooluse
+context-mode hook vscode-copilot precompact
+context-mode hook vscode-copilot sessionstart
+```
+
 **Known Issues / Caveats:**
 - Preview status -- API may change without notice
 - Matchers are parsed but IGNORED (all hooks fire on all tools)
@@ -275,3 +316,45 @@ VS Code Copilot uses the same JSON stdin/stdout paradigm as Claude Code with Pas
 | OpenCode | `{ "additionalContext": "..." }` |
 | Codex CLI | N/A |
 | VS Code Copilot | `{ "hookSpecificOutput": { "hookEventName": "PostToolUse", "additionalContext": "..." } }` |
+
+---
+
+## CLI Hook Dispatcher
+
+All hook-based platforms use the CLI dispatcher pattern instead of direct `node` paths:
+
+```
+context-mode hook <platform> <event>
+```
+
+The dispatcher resolves the hook script relative to the installed package and dynamically imports it. Stdin/stdout flow through naturally since it runs in the same process.
+
+**Advantages over `node ./node_modules/...` paths:**
+- Works from any directory (no per-project `npm install` needed)
+- Single global install serves all projects
+- `context-mode upgrade` updates hooks in-place
+- Short, portable command strings in settings files
+
+**Supported dispatches:**
+
+| Platform | Events |
+|----------|--------|
+| `claude-code` | `pretooluse`, `posttooluse`, `precompact`, `sessionstart`, `userpromptsubmit` |
+| `gemini-cli` | `beforetool`, `aftertool`, `precompress`, `sessionstart` |
+| `vscode-copilot` | `pretooluse`, `posttooluse`, `precompact`, `sessionstart` |
+
+OpenCode uses a TS plugin paradigm (no command dispatcher). Codex CLI has no hook support.
+
+---
+
+## Utility Commands
+
+All platforms support utility commands via MCP meta-tools:
+
+| Command | What it does |
+|---------|-------------|
+| `ctx stats` | Show context savings, call counts, and session statistics |
+| `ctx doctor` | Diagnose installation: runtimes, hooks, FTS5, versions |
+| `ctx upgrade` | Update from GitHub, rebuild, reconfigure hooks |
+
+**How they work:** The MCP server exposes `stats`, `doctor`, and `upgrade` tools. The `<ctx_commands>` section in routing instructions (CLAUDE.md, GEMINI.md, AGENTS.md, copilot-instructions.md) maps natural language triggers to MCP tool calls. The `doctor` and `upgrade` tools return shell commands that the LLM executes and formats as a checklist.
