@@ -90,11 +90,9 @@ describe("cli.bundle.mjs — marketplace install support", () => {
 
   // ── .gitignore ─────────────────────────────────────────────
 
-  it(".gitignore does not exclude cli.bundle.mjs", () => {
+  it(".gitignore excludes bundle files (CI uses git add -f)", () => {
     const gitignore = readFileSync(resolve(ROOT, ".gitignore"), "utf-8");
-    // cli.bundle.mjs must NOT be in gitignore patterns
-    expect(gitignore).not.toContain("cli.bundle.mjs\n");
-    // But should have a comment documenting it's committed
-    expect(gitignore).toContain("cli.bundle.mjs is committed");
+    expect(gitignore).toContain("server.bundle.mjs");
+    expect(gitignore).toContain("cli.bundle.mjs");
   });
 });

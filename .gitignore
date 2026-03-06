@@ -5,5 +5,5 @@ packages/*/dist/
 .DS_Store
 /tmp/
 *.db
-# server.bundle.mjs is committed by CI — do NOT gitignore
-# cli.bundle.mjs is committed by CI — do NOT gitignore
+server.bundle.mjs
+cli.bundle.mjs
