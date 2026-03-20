@@ -926,7 +926,8 @@ server.registerTool(
   {
     title: "Search Indexed Content",
     description:
-      "Search indexed content. Pass ALL search questions as queries array in ONE call.\n\n" +
+      "Search indexed content. Requires prior indexing via ctx_batch_execute, ctx_index, or ctx_fetch_and_index. " +
+      "Pass ALL search questions as queries array in ONE call.\n\n" +
       "TIPS: 2-4 specific terms per query. Use 'source' to scope results.",
     inputSchema: z.object({
       queries: z.preprocess(coerceJsonArray, z
@@ -952,14 +953,19 @@ server.registerTool(
     try {
       const store = getStore();
 
-      // Guard: refuse to search when the index is empty — the result would
-      // always be empty, and surfacing ctx_search to the model in this state
-      // leads to hallucinated "no results" answers in new sessions.
+      // Guard: redirect when the index is empty — ctx_search is a follow-up
+      // tool that requires prior indexing. Guide the model to the right tool.
       if (store.getStats().chunks === 0) {
         return trackResponse("ctx_search", {
           content: [{
             type: "text" as const,
-            text: "No indexed content found. Use ctx_batch_execute or ctx_index to index content before searching.",
+            text: "Knowledge base is empty — no content has been indexed yet.\n\n" +
+              "ctx_search is a follow-up tool that queries previously indexed content. " +
+              "To gather and index content first, use:\n" +
+              "  • ctx_batch_execute(commands, queries) — run commands, auto-index output, and search in one call\n" +
+              "  • ctx_fetch_and_index(url) — fetch a URL, index it, then search with ctx_search\n" +
+              "  • ctx_index(content, source) — manually index text content\n\n" +
+              "After indexing, ctx_search becomes available for follow-up queries.",
           }],
           isError: true,
         });
