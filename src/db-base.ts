@@ -117,7 +117,13 @@ export function loadDatabase(): typeof DatabaseConstructor {
   if (!_Database) {
     const require = createRequire(import.meta.url);
     try {
-      _Database = require("better-sqlite3") as typeof DatabaseConstructor;
+      const mod = require("better-sqlite3");
+      // Bun's require("better-sqlite3") doesn't throw — returns undefined (#163).
+      // Validate the result is a usable constructor before assigning.
+      if (!mod || typeof mod !== "function") {
+        throw new Error("better-sqlite3 loaded but not usable (Bun compatibility issue)");
+      }
+      _Database = mod as typeof DatabaseConstructor;
     } catch {
       // better-sqlite3 unavailable (Bun runtime) — wrap bun:sqlite
       if (!(globalThis as any).Bun) {
