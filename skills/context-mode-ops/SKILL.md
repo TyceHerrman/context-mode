@@ -7,15 +7,22 @@ description: Manage context-mode GitHub issues, PRs, and releases with parallel 
 
 Parallel subagent army for issue triage, PR review, and releases.
 
-## TDD-First: Non-Negotiable
+## TDD-First: BLOCKING GATE
 
-**Every code change follows Red-Green-Refactor.** This codebase is fragile — 12 adapters, 3 OS, hooks, FTS5, sessions. One untested change breaks everything.
+<tdd_enforcement>
+STOP. Before writing ANY implementation code, you MUST have a failing test.
+No exceptions. No "I'll add tests later." No "this change is too small for tests."
+This codebase has 12 adapters, 3 OS, hooks, FTS5, sessions — it is FRAGILE.
+One untested change breaks everything. TDD is not optional, it is the gate.
+</tdd_enforcement>
 
-See [tdd.md](tdd.md) for the full methodology. Key rules:
-- **Vertical slices**: ONE test → ONE implementation → repeat. Never write all tests first.
-- **Staff Engineers** must write failing test BEFORE writing fix code.
-- **QA Engineer** validates all tests pass after every change.
-- **Architects** reject any change that doesn't include tests.
+**Read [tdd.md](tdd.md) FIRST. It is the law.** Summary:
+
+1. **STOP** if you haven't written a failing test. You cannot write implementation code.
+2. **Vertical slices ONLY**: ONE test → ONE implementation → repeat. NEVER all tests first.
+3. **Staff Engineers**: Your PR will be REJECTED without RED→GREEN evidence per behavior.
+4. **Architects**: REJECT any change without tests. No exceptions, no "trivial change" excuse.
+5. **QA Engineer**: Run full suite after EVERY change. Report failures immediately.
 
 ## You Are the Engineering Manager
 

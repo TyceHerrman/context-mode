@@ -55,19 +55,15 @@ npm version patch
 4. The `version` script stages the manifest files
 5. npm creates a git commit and tag
 
-### 3. Build & Verify
+### 3. Validate (NO Build Needed)
+
+**Do NOT run `npm run build` or `npm run bundle`.** CI generates bundle files automatically on GitHub. You only validate:
 
 ```bash
-# Full build (TypeScript compile + esbuild bundles)
-npm run build
-
-# Verify build artifacts exist
-ls -la server.bundle.mjs cli.bundle.mjs hooks/
-
-# Run tests against built output
+# Tests
 npm test
 
-# TypeScript check
+# TypeScript
 npm run typecheck
 ```
 
@@ -159,8 +155,7 @@ Before declaring release complete:
 - [ ] `npm test` — all pass
 - [ ] `npm run typecheck` — no errors
 - [ ] `npm version patch` — version bumped in all manifests
-- [ ] `npm run build` — bundles generated
-- [ ] `git push origin main --tags` — pushed with tag
+- [ ] `git push origin main --tags` — pushed with tag (CI builds bundles automatically)
 - [ ] `gh release create` — GitHub release published
 - [ ] `npm publish` — package on npm registry
 - [ ] `next` branch synced with `main`
