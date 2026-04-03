@@ -393,7 +393,7 @@ Full documentation: [`docs/adapters/openclaw.md`](docs/adapters/openclaw.md)
 </details>
 
 <details>
-<summary><strong>Codex CLI</strong> — hooks + MCP</summary>
+<summary><strong>Codex CLI</strong> — MCP + hooks (waiting for upstream dispatch)</summary>
 
 **Prerequisites:** Node.js 18+, Codex CLI installed.
 
@@ -412,18 +412,16 @@ Full documentation: [`docs/adapters/openclaw.md`](docs/adapters/openclaw.md)
    command = "context-mode"
    ```
 
-3. Enable the hooks feature flag. Add to `~/.codex/config.toml`:
+3. *(Waiting for upstream)* Enable the hooks feature flag. Add to `~/.codex/config.toml`:
 
    ```toml
    [features]
    codex_hooks = true
    ```
 
-   Or per-session: `codex --enable codex_hooks`
+   > **Status:** Codex CLI's hook system is implemented in source (`codex-rs/hooks/`) but hook dispatch is not yet wired into the tool execution pipeline (`Stage::UnderDevelopment`). The feature flag is accepted but hooks don't fire during sessions as of v0.118.0. Our hook scripts are ready — they'll work immediately once Codex enables dispatch. Track progress: [openai/codex#16685](https://github.com/openai/codex/issues/16685).
 
-   > **Why:** Codex CLI hooks are behind the `codex_hooks` feature flag (`Stage::UnderDevelopment`, disabled by default). Without this, hooks won't fire. Source: [`codex-rs/features/src/lib.rs:656`](https://github.com/openai/codex/blob/main/codex-rs/features/src/lib.rs).
-
-4. Add hooks for routing enforcement and session tracking. Create `~/.codex/hooks.json`:
+4. *(Prepare for when dispatch is enabled)* Add hooks for routing enforcement and session tracking. Create `~/.codex/hooks.json`:
 
    ```json
    {
@@ -449,7 +447,7 @@ Full documentation: [`docs/adapters/openclaw.md`](docs/adapters/openclaw.md)
 
 **Verify:** Start a session and type `ctx stats`. Context-mode tools should appear and respond.
 
-**Routing:** Hooks enforce routing programmatically via PreToolUse. PostToolUse tracks session events. SessionStart restores state. The optional AGENTS.md file provides routing instructions for model awareness. Codex CLI's hook system uses the same JSON stdin/stdout wire protocol as Claude Code but does not support arg or output modification.
+**Routing:** MCP tools work. Hook-based routing is ready but waiting for Codex to enable hook dispatch. The `AGENTS.md` file provides routing instructions for model awareness in the meantime.
 
 > **Exec mode limitation:** `codex exec` cancels all MCP tool calls because headless mode rejects `RequestUserInput`. Use interactive mode (`codex`) or `codex --full-auto` instead. This is an upstream Codex limitation, not a context-mode issue.
 
@@ -759,7 +757,7 @@ Session continuity requires 4 hooks working together:
 | **SessionStart** | Restores state after compaction or resume | Yes | Yes | Yes | -- | -- | -- | Plugin | Yes | -- | -- | -- | ✓ (via session_start event) |
 | | **Session completeness** | **Full** | **High** | **High** | **Partial** | **High** | **High** | **High** | **Partial** | **--** | **Partial** | **--** | **High** |
 
-> **Note:** Full session continuity (capture + snapshot + restore) works on **Claude Code**, **Gemini CLI**, and **VS Code Copilot**. **OpenCode** provides **high** session continuity: it captures tool events and injects compaction snapshots via the plugin, but SessionStart is not yet available ([#14808](https://github.com/sst/opencode/issues/14808)), so startup/resume restore is not supported. **KiloCode** shares the same plugin architecture as OpenCode via the OpenCodeAdapter, so its continuity level depends on KiloCode's SessionStart support. **Cursor** captures tool events via `preToolUse`/`postToolUse`, but `sessionStart` is currently rejected by Cursor's validator ([forum report](https://forum.cursor.com/t/unknown-hook-type-sessionstart/149566)), so session restore after compaction is not available yet. **OpenClaw** uses native gateway plugin hooks (`api.on()`) for full session continuity. **Pi Coding Agent** provides high session continuity via extension hooks (`tool_call`, `tool_result`, `session_start`, `session_before_compact`). **Codex CLI** provides hook-based session tracking via PreToolUse/PostToolUse/SessionStart, using the same JSON stdin/stdout protocol as Claude Code. **Antigravity**, **Kiro**, and **Zed** have no hook support in the current release, so session tracking is not available.
+> **Note:** Full session continuity (capture + snapshot + restore) works on **Claude Code**, **Gemini CLI**, and **VS Code Copilot**. **OpenCode** provides **high** session continuity: it captures tool events and injects compaction snapshots via the plugin, but SessionStart is not yet available ([#14808](https://github.com/sst/opencode/issues/14808)), so startup/resume restore is not supported. **KiloCode** shares the same plugin architecture as OpenCode via the OpenCodeAdapter, so its continuity level depends on KiloCode's SessionStart support. **Cursor** captures tool events via `preToolUse`/`postToolUse`, but `sessionStart` is currently rejected by Cursor's validator ([forum report](https://forum.cursor.com/t/unknown-hook-type-sessionstart/149566)), so session restore after compaction is not available yet. **OpenClaw** uses native gateway plugin hooks (`api.on()`) for full session continuity. **Pi Coding Agent** provides high session continuity via extension hooks (`tool_call`, `tool_result`, `session_start`, `session_before_compact`). **Codex CLI** hook-based session tracking is ready but waiting for upstream hook dispatch (codex_hooks Stage::UnderDevelopment, [openai/codex#16685](https://github.com/openai/codex/issues/16685)). MCP tools work. Once dispatch is enabled, session tracking will activate automatically. **Antigravity**, **Kiro**, and **Zed** have no hook support in the current release, so session tracking is not available.
 
 <details>
 <summary><strong>What gets captured</strong></summary>
@@ -842,7 +840,7 @@ Detailed event data is also indexed into FTS5 for on-demand retrieval via `searc
 
 **OpenClaw / Pi Agent** — High coverage. All tool lifecycle hooks (`after_tool_call`, `before_compaction`, `session_start`) fire via the native gateway plugin. User decisions aren't captured but file edits, git ops, errors, and tasks are fully tracked. Falls back to DB snapshot reconstruction if compaction hooks fail on older gateway versions. See [`docs/adapters/openclaw.md`](docs/adapters/openclaw.md).
 
-**Codex CLI** — Hook-based session tracking. PreToolUse enforces routing, PostToolUse captures events, SessionStart restores state after compaction. Same wire protocol as Claude Code. PreCompact and UserPromptSubmit are not yet available, so compaction snapshots rely on DB reconstruction.
+**Codex CLI** — MCP active, hooks ready. Hook scripts (PreToolUse, PostToolUse, SessionStart) are implemented and tested but Codex CLI doesn't dispatch them yet (Stage::UnderDevelopment). MCP tools work. Track: [openai/codex#16685](https://github.com/openai/codex/issues/16685).
 
 **Antigravity** — No session support. No hooks, no event capture. Requires manually copying `GEMINI.md` to your project root. Auto-detected via MCP protocol handshake (`clientInfo.name`).
 
@@ -875,7 +873,7 @@ Detailed event data is also indexed into FTS5 for on-demand retrieval via `searc
 >
 > **OpenClaw** runs context-mode as a native gateway plugin targeting Pi Agent sessions. Hooks register via `api.on()` (tool/lifecycle) and `api.registerHook()` (commands). All tool interception and compaction hooks are supported. See [`docs/adapters/openclaw.md`](docs/adapters/openclaw.md).
 >
-> **Codex CLI** supports hooks via the `codex_hooks` feature flag, using the same JSON stdin/stdout protocol as Claude Code. PreToolUse enforces routing, PostToolUse captures events, and SessionStart restores state. See the Codex install section for setup. **Antigravity** and **Zed** do not support hooks. They rely solely on manually-copied routing instruction files (`AGENTS.md` / `GEMINI.md`) for enforcement (~60% compliance). See each platform's install section for copy instructions. Antigravity and Zed are auto-detected via MCP protocol handshake — no manual platform configuration needed.
+> **Codex CLI** hooks are implemented but dispatch is not yet active (`codex_hooks` is `Stage::UnderDevelopment`). MCP tools work. Hook scripts are ready and will activate once Codex enables dispatch ([openai/codex#16685](https://github.com/openai/codex/issues/16685)). See the Codex install section for setup. **Antigravity** and **Zed** do not support hooks. They rely solely on manually-copied routing instruction files (`AGENTS.md` / `GEMINI.md`) for enforcement (~60% compliance). See each platform's install section for copy instructions. Antigravity and Zed are auto-detected via MCP protocol handshake — no manual platform configuration needed.
 >
 > **Kiro** supports native `preToolUse` and `postToolUse` hooks for routing enforcement and tool event capture. `agentSpawn` (SessionStart equivalent) and `stop` are not yet wired. Requires manually copying `KIRO.md` to your project root. Kiro is auto-detected via MCP protocol handshake (`clientInfo.name`).
 >

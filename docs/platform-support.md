@@ -180,7 +180,7 @@ OpenCode uses a TypeScript plugin paradigm instead of JSON stdin/stdout. Hooks a
 
 ### Codex CLI
 
-**Status:** Supported (hooks + MCP)
+**Status:** Supported (MCP active, hooks ready — waiting for upstream dispatch)
 
 **Hook Paradigm:** JSON stdin/stdout
 
@@ -210,10 +210,10 @@ context-mode hook codex sessionstart
 ```
 
 **Known Issues / Caveats:**
+- Hook dispatch is NOT yet active in Codex CLI sessions. `codex_hooks` feature flag is `Stage::UnderDevelopment` — the flag is accepted but hooks don't fire during real sessions (verified v0.118.0 by beta tester). Our hook scripts are ready and will work once Codex enables dispatch. Track: [openai/codex#16685](https://github.com/openai/codex/issues/16685), [openai/codex#15824](https://github.com/openai/codex/issues/15824).
 - `tool_name` is always "Bash" (Codex only has one tool type)
 - updatedInput and updatedMCPToolOutput are in the schema but NOT implemented
 - Default hook timeout: 600 seconds
-- `codex_hooks` feature flag is disabled by default (`Stage::UnderDevelopment`). Enable with `[features] codex_hooks = true` in `~/.codex/config.toml` or `codex --enable codex_hooks` per-session. Source: `codex-rs/features/src/lib.rs:656-661`.
 - `codex exec` mode cancels ALL MCP tool calls — headless mode rejects `RequestUserInput` required for MCP approval. Use interactive mode or `codex --full-auto`. Source: `codex-rs/exec/src/lib.rs:1367-1378`.
 
 ---
@@ -501,6 +501,8 @@ The dispatcher resolves the hook script relative to the installed package and dy
 | `vscode-copilot` | `pretooluse`, `posttooluse`, `precompact`, `sessionstart` |
 | `cursor` | `pretooluse`, `posttooluse`, `stop` |
 | `codex` | `pretooluse`, `posttooluse`, `sessionstart` |
+
+† Codex hook dispatches are ready but Codex CLI doesn't fire hooks yet (Stage::UnderDevelopment).
 
 OpenCode uses a TS plugin paradigm (no command dispatcher). Antigravity and Kiro have no hook support.
 
