@@ -61,9 +61,9 @@ redact() {
     -e 's/(xox[bpras]-[A-Za-z0-9]{4})[A-Za-z0-9-]+/\1***REDACTED***/g' \
     -e 's|(postgres(ql)?://[^:]+:)[^@]+(@)|\1***REDACTED***\3|g' \
     -e 's|(mongodb(\+srv)?://[^:]+:)[^@]+(@)|\1***REDACTED***\3|g' \
-    -e 's|(mysql://[^:]+:)[^@]+(@)|\1***REDACTED***\3|g' \
-    -e 's|(redis://[^:]+:)[^@]+(@)|\1***REDACTED***\3|g' \
-    -e 's|(https?://[^:]+:)[^@]+(@)|\1***REDACTED***\3|g'
+    -e 's|(mysql://[^:]+:)[^@]+(@)|\1***REDACTED***\2|g' \
+    -e 's|(redis://[^:]+:)[^@]+(@)|\1***REDACTED***\2|g' \
+    -e 's|(https?://[^:]+:)[^@]+(@)|\1***REDACTED***\2|g'
 }
 
 section() {
@@ -583,12 +583,12 @@ SESSION_DIRS=(
 TOTAL_DB_COUNT=0
 for SESSION_DIR in "${SESSION_DIRS[@]}"; do
   if [ -d "$SESSION_DIR" ]; then
-    DB_FILES="$(find "$SESSION_DIR" -name '*.db' -type f 2>/dev/null)"
-    DB_COUNT="$(printf '%s' "$DB_FILES" | grep -c . 2>/dev/null || echo 0)"
-    if [ "$DB_COUNT" -gt 0 ]; then
+    DB_COUNT="$(find "$SESSION_DIR" -name '*.db' -type f 2>/dev/null | wc -l | tr -d ' ')"
+    DB_COUNT="${DB_COUNT:-0}"
+    if [ "$DB_COUNT" -gt 0 ] 2>/dev/null; then
       TOTAL_DB_COUNT=$((TOTAL_DB_COUNT + DB_COUNT))
       if command -v du &>/dev/null; then
-        DB_SIZE="$(printf '%s' "$DB_FILES" | xargs du -ch 2>/dev/null | tail -1 | cut -f1)"
+        DB_SIZE="$(find "$SESSION_DIR" -name '*.db' -type f 2>/dev/null | xargs du -ch 2>/dev/null | tail -1 | cut -f1)"
       else
         DB_SIZE="unknown"
       fi
