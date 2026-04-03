@@ -72,12 +72,16 @@ body:
     attributes:
       label: Debug script output (REQUIRED)
       description: |
-        Run `bash scripts/ctx-debug.sh` (or `npx context-mode debug`) and paste the full output below.
-        This collects OS, runtimes, configs, hooks, and SQLite diagnostics automatically.
-        Must be on the LATEST version. If not latest, upgrade first.
-        **Issues without debug script output will be closed immediately.**
-      placeholder: "Paste the output of: bash scripts/ctx-debug.sh"
-      render: shell
+        Run the diagnostic script and paste the JSON output:
+        ```
+        bash scripts/ctx-debug.sh
+        cat /tmp/ctx-debug-*.json   # paste this
+        ```
+        If installed via npm: `bash "$(npm root -g)/context-mode/scripts/ctx-debug.sh"`
+        The script writes a JSON file to /tmp — copy its contents here.
+        **Issues without debug output will be closed immediately.**
+      placeholder: "Paste the contents of /tmp/ctx-debug-<timestamp>.json"
+      render: json
     validations:
       required: true
 
