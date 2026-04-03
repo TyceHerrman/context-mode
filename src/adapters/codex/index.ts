@@ -156,8 +156,13 @@ export class CodexAdapter implements HookAdapter {
         },
       };
     }
-    // Codex does NOT support additionalContext in PreToolUse responses.
-    // "context" decisions are silently dropped — routing works via AGENTS.md instead.
+    if (response.decision === "context" && response.additionalContext) {
+      return {
+        hookSpecificOutput: {
+          additionalContext: response.additionalContext,
+        },
+      };
+    }
     // "allow" — return empty object for passthrough
     return {};
   }
@@ -224,10 +229,18 @@ export class CodexAdapter implements HookAdapter {
   }
 
   generateHookConfig(pluginRoot: string): HookRegistration {
-    // PreToolUse excluded: Codex does not support additionalContext in PreToolUse
-    // responses, which pretooluse.mjs emits for routing. Deny rules are useful but
-    // the additionalContext error makes it unusable. Remove when Codex adds support.
     return {
+      PreToolUse: [
+        {
+          matcher: "",
+          hooks: [
+            {
+              type: "command",
+              command: `node ${pluginRoot}/hooks/pretooluse.mjs`,
+            },
+          ],
+        },
+      ],
       PostToolUse: [
         {
           matcher: "",

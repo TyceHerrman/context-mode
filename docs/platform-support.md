@@ -204,11 +204,10 @@ Codex CLI's Rust backend (codex-rs) includes a full hook system with 5 events, u
 
 **Hook Commands:**
 ```
+context-mode hook codex pretooluse
 context-mode hook codex posttooluse
 context-mode hook codex sessionstart
 ```
-
-> **Note:** PreToolUse is excluded — Codex does not support `additionalContext` in PreToolUse responses ([#225](https://github.com/mksglu/context-mode/issues/225)). Routing is handled via `AGENTS.md` instead.
 
 **Known Issues / Caveats:**
 - Hook dispatch is NOT yet active in Codex CLI sessions. `codex_hooks` feature flag is `Stage::UnderDevelopment` — the flag is accepted but hooks don't fire during real sessions (verified v0.118.0 by beta tester). Our hook scripts are ready and will work once Codex enables dispatch. Track: [openai/codex#15824](https://github.com/openai/codex/issues/15824).

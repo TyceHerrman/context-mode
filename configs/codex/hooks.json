@@ -1,8 +1,14 @@
 {
   "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          { "type": "command", "command": "context-mode hook codex pretooluse" }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
-        "matcher": "",
         "hooks": [
           { "type": "command", "command": "context-mode hook codex posttooluse" }
         ]
@@ -10,7 +16,6 @@
     ],
     "SessionStart": [
       {
-        "matcher": "",
         "hooks": [
           { "type": "command", "command": "context-mode hook codex sessionstart" }
         ]

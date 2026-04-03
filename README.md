@@ -426,13 +426,14 @@ Full documentation: [`docs/adapters/openclaw.md`](docs/adapters/openclaw.md)
    ```json
    {
      "hooks": {
-       "PostToolUse": [{ "matcher": "", "hooks": [{ "type": "command", "command": "context-mode hook codex posttooluse" }] }],
-       "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": "context-mode hook codex sessionstart" }] }]
+       "PreToolUse": [{ "hooks": [{ "type": "command", "command": "context-mode hook codex pretooluse" }] }],
+       "PostToolUse": [{ "hooks": [{ "type": "command", "command": "context-mode hook codex posttooluse" }] }],
+       "SessionStart": [{ "hooks": [{ "type": "command", "command": "context-mode hook codex sessionstart" }] }]
      }
    }
    ```
 
-   `PostToolUse` captures session events. `SessionStart` restores state after compaction. PreToolUse is excluded — Codex does not support `additionalContext` in PreToolUse responses. Routing is handled via `AGENTS.md` instead.
+   `PreToolUse` enforces sandbox routing (blocks dangerous commands, redirects to MCP tools). `PostToolUse` captures session events. `SessionStart` restores state after compaction.
 
 5. Copy routing instructions (recommended even with hooks for full routing awareness):
 
