@@ -12,7 +12,7 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { ContentStore, cleanupStaleDBs } from "../src/store.js";
-import { withRetry } from "../src/db-base.js";
+import { withRetry, closeDB, loadDatabase, applyWALPragmas } from "../src/db-base.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const fixtureDir = join(__dirname, "fixtures");
@@ -1280,5 +1280,61 @@ describe("SQLITE_BUSY retry logic", () => {
       }, [0, 0, 0]);
     }).toThrow("UNIQUE constraint failed");
     expect(attempts).toBe(1);
+  });
+});
+
+// ── WAL checkpoint on close (#244) ──
+
+describe("closeDB — WAL checkpoint", () => {
+  test("closeDB checkpoints WAL so no -wal file remains", () => {
+    const dbPath = join(tmpdir(), `wal-test-${Date.now()}.db`);
+    const Database = loadDatabase();
+    const db = Database(dbPath, { timeout: 30000 });
+    applyWALPragmas(db);
+    db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)");
+    db.exec("INSERT INTO t VALUES (1, 'hello')");
+
+    // WAL file should exist after writes in WAL mode
+    expect(existsSync(dbPath + "-wal")).toBe(true);
+
+    closeDB(db);
+
+    // After closeDB, WAL should be checkpointed (truncated to 0 or removed)
+    // The file may still exist but should be empty, or may not exist
+    const walExists = existsSync(dbPath + "-wal");
+    if (walExists) {
+      const walSize = readFileSync(dbPath + "-wal").length;
+      expect(walSize).toBe(0);
+    }
+
+    // cleanup
+    for (const s of ["", "-wal", "-shm"]) {
+      try { unlinkSync(dbPath + s); } catch {}
+    }
+  });
+});
+
+// ── Corrupt DB recovery (#244) ──
+
+describe("ContentStore — corrupt DB recovery", () => {
+  test("recovers from corrupt DB file by deleting and recreating", () => {
+    const dbPath = join(tmpdir(), `corrupt-store-${Date.now()}.db`);
+    // Write garbage to simulate corrupt DB
+    writeFileSync(dbPath, "THIS IS NOT A SQLITE DATABASE FILE");
+    writeFileSync(dbPath + "-wal", "CORRUPT WAL");
+
+    // Should recover: delete corrupt files and create fresh DB
+    const store = new ContentStore(dbPath);
+    // Store should be functional
+    store.index({ content: "test content", source: "test" });
+    const results = store.search("test content");
+    expect(results.length).toBeGreaterThan(0);
+
+    store.cleanup();
+  });
+
+  test("non-SQLite errors still throw", () => {
+    // A path to a directory (not a file) should throw a non-corruption error
+    expect(() => new ContentStore(tmpdir())).toThrow();
   });
 });

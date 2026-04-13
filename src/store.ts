@@ -9,7 +9,7 @@
  */
 
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import { loadDatabase, applyWALPragmas, closeDB, withRetry } from "./db-base.js";
+import { loadDatabase, applyWALPragmas, closeDB, withRetry, deleteDBFiles, isSQLiteCorruptionError } from "./db-base.js";
 import type { PreparedStatement } from "./db-base.js";
 import { readFileSync, readdirSync, unlinkSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -302,8 +302,27 @@ export class ContentStore {
     const Database = loadDatabase();
     this.#dbPath =
       dbPath ?? join(tmpdir(), `context-mode-${process.pid}.db`);
-    this.#db = new Database(this.#dbPath, { timeout: 30000 });
-    applyWALPragmas(this.#db);
+    let db: DatabaseInstance;
+    try {
+      db = new Database(this.#dbPath, { timeout: 30000 });
+      applyWALPragmas(db);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (isSQLiteCorruptionError(msg)) {
+        deleteDBFiles(this.#dbPath);
+        try {
+          db = new Database(this.#dbPath, { timeout: 30000 });
+          applyWALPragmas(db);
+        } catch (retryErr) {
+          throw new Error(
+            `Failed to create fresh DB after deleting corrupt file: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`
+          );
+        }
+      } else {
+        throw err;
+      }
+    }
+    this.#db = db;
     this.#initSchema();
     this.#prepareStatements();
   }

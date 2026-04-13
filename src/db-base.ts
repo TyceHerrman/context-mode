@@ -9,7 +9,7 @@
 import type DatabaseConstructor from "better-sqlite3";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { createRequire } from "node:module";
-import { unlinkSync } from "node:fs";
+import { unlinkSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -335,6 +335,36 @@ export function withRetry<T>(fn: () => T, delays: number[] = [100, 500, 2000]): 
 }
 
 // ─────────────────────────────────────────────────────────
+// Corrupt DB recovery (#244)
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Detect SQLite corruption errors that warrant a rename-and-recreate.
+ * Matches SQLITE_CORRUPT, SQLITE_NOTADB, and their human-readable equivalents.
+ */
+export function isSQLiteCorruptionError(msg: string): boolean {
+  return (
+    msg.includes("SQLITE_CORRUPT") ||
+    msg.includes("SQLITE_NOTADB") ||
+    msg.includes("database disk image is malformed") ||
+    msg.includes("file is not a database")
+  );
+}
+
+/**
+ * Rename a corrupt DB and its WAL/SHM files so a fresh DB can be created.
+ * Best-effort — individual rename failures are silently ignored.
+ */
+export function renameCorruptDB(dbPath: string): void {
+  const ts = Date.now();
+  for (const suffix of ["", "-wal", "-shm"]) {
+    try {
+      renameSync(dbPath + suffix, `${dbPath}${suffix}.corrupt-${ts}`);
+    } catch { /* file may not exist */ }
+  }
+}
+
+// ─────────────────────────────────────────────────────────
 // Base class
 // ─────────────────────────────────────────────────────────
 
@@ -362,7 +392,7 @@ const _liveDBs: Set<DatabaseInstance> = (() => {
     g[_kLiveDBs] = new Set<DatabaseInstance>();
     process.on("exit", () => {
       for (const db of g[_kLiveDBs]!) {
-        try { db.close(); } catch { /* already closed */ }
+        closeDB(db);
       }
       g[_kLiveDBs]!.clear();
     });
@@ -377,9 +407,28 @@ export abstract class SQLiteBase {
   constructor(dbPath: string) {
     const Database = loadDatabase();
     this.#dbPath = dbPath;
-    this.#db = new Database(dbPath, { timeout: 30000 });
+    let db: DatabaseInstance;
+    try {
+      db = new Database(dbPath, { timeout: 30000 });
+      applyWALPragmas(db);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (isSQLiteCorruptionError(msg)) {
+        renameCorruptDB(dbPath);
+        try {
+          db = new Database(dbPath, { timeout: 30000 });
+          applyWALPragmas(db);
+        } catch (retryErr) {
+          throw new Error(
+            `Failed to create fresh DB after renaming corrupt file: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`
+          );
+        }
+      } else {
+        throw err;
+      }
+    }
+    this.#db = db;
     _liveDBs.add(this.#db);
-    applyWALPragmas(this.#db);
     this.initSchema();
     this.prepareStatements();
   }
