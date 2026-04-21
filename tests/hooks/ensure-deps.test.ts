@@ -29,12 +29,10 @@ const captured = [];
 
 for (const pkg of NATIVE_DEPS) {
   const pkgDir = resolve(root, "node_modules", pkg);
+  const binaryPath = resolve(pkgDir, "build", "Release", "better_sqlite3.node");
   if (!existsSync(pkgDir)) {
     captured.push("install:" + pkg);
-  } else if (
-    !existsSync(resolve(pkgDir, "build", "Release")) &&
-    !existsSync(resolve(pkgDir, "prebuilds"))
-  ) {
+  } else if (!existsSync(binaryPath)) {
     captured.push("rebuild:" + pkg);
   }
 }
@@ -79,22 +77,31 @@ describe("ensure-deps: native binary detection (#206)", () => {
 
   test("runs npm rebuild when package dir exists but no native binary", () => {
     const root = createTempRoot();
-    // Simulate ignore-scripts=true: directory exists, no build/Release or prebuilds
+    // Simulate ignore-scripts=true: directory exists, no native binary
     mkdirSync(join(root, "node_modules", "better-sqlite3"), { recursive: true });
     const commands = runHarness(root);
     expect(commands).toEqual(["rebuild:better-sqlite3"]);
   });
 
-  test("skips when build/Release exists", () => {
+  test("runs npm rebuild when build/Release exists but native binary is missing", () => {
     const root = createTempRoot();
     mkdirSync(join(root, "node_modules", "better-sqlite3", "build", "Release"), { recursive: true });
     const commands = runHarness(root);
-    expect(commands).toEqual([]);
+    expect(commands).toEqual(["rebuild:better-sqlite3"]);
   });
 
-  test("skips when prebuilds exists", () => {
+  test("runs npm rebuild when prebuilds exists but native binary is missing", () => {
     const root = createTempRoot();
     mkdirSync(join(root, "node_modules", "better-sqlite3", "prebuilds"), { recursive: true });
+    const commands = runHarness(root);
+    expect(commands).toEqual(["rebuild:better-sqlite3"]);
+  });
+
+  test("skips when actual native binary exists", () => {
+    const root = createTempRoot();
+    const releaseDir = join(root, "node_modules", "better-sqlite3", "build", "Release");
+    mkdirSync(releaseDir, { recursive: true });
+    writeFileSync(join(releaseDir, "better_sqlite3.node"), "native-binary");
     const commands = runHarness(root);
     expect(commands).toEqual([]);
   });
@@ -155,17 +162,12 @@ if (existsSync(abiCachePath)) {
   captured.push("cache-invalid");
 }
 
-if (!existsSync(binaryPath)) {
-  console.log(JSON.stringify(captured));
-  process.exit(0);
-}
-
-if (probeNative()) {
+if (existsSync(binaryPath) && probeNative()) {
   captured.push("probe-ok");
   copyFileSync(binaryPath, abiCachePath);
   captured.push("cached");
 } else {
-  captured.push("probe-fail");
+  captured.push(existsSync(binaryPath) ? "probe-fail" : "binary-missing");
   writeFileSync(binaryPath, "VALID-rebuilt-binary");
   captured.push("rebuilt");
   copyFileSync(binaryPath, abiCachePath);
@@ -222,6 +224,16 @@ describe("ensure-deps: ABI cache validation (#148 follow-up)", () => {
     expect(actions).toEqual(["probe-ok", "cached"]);
   });
 
+  test("missing native binary in existing native dir: rebuilds and caches", () => {
+    const root = createTempRoot();
+    const releaseDir = join(root, "node_modules", "better-sqlite3", "build", "Release");
+    mkdirSync(releaseDir, { recursive: true });
+    // No better_sqlite3.node on disk and no cache file
+
+    const actions = runAbiHarness(root);
+    expect(actions).toEqual(["binary-missing", "rebuilt", "cached"]);
+  });
+
   test("missing ABI cache with incompatible binary: rebuilds and caches", () => {
     const root = createTempRoot();
     const releaseDir = join(root, "node_modules", "better-sqlite3", "build", "Release");
@@ -266,6 +278,32 @@ try {
 }
 `;
     const harnessPath = join(root, "_degrade-harness.mjs");
+    writeFileSync(harnessPath, harness, "utf-8");
+    const result = spawnSync("node", [harnessPath], {
+      encoding: "utf-8",
+      timeout: 30_000,
+      cwd: join(fileURLToPath(import.meta.url), "..", ".."),
+    });
+    if (result.error) throw result.error;
+    const out = JSON.parse(result.stdout.trim());
+    expect(out).toEqual({ threw: false });
+  });
+
+  test("graceful degradation: missing native binary rebuild failure does not throw", () => {
+    const root = createTempRoot();
+    const releaseDir = join(root, "node_modules", "better-sqlite3", "build", "Release");
+    mkdirSync(releaseDir, { recursive: true });
+
+    const harness = `
+import { ensureNativeCompat } from ${JSON.stringify("file://" + ensureDepsAbsPath.replace(/\\/g, "/"))};
+try {
+  ensureNativeCompat(${JSON.stringify(root)});
+  console.log(JSON.stringify({ threw: false }));
+} catch (e) {
+  console.log(JSON.stringify({ threw: true, error: e.message }));
+}
+`;
+    const harnessPath = join(root, "_missing-binary-degrade-harness.mjs");
     writeFileSync(harnessPath, harness, "utf-8");
     const result = spawnSync("node", [harnessPath], {
       encoding: "utf-8",
