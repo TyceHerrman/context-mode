@@ -1938,6 +1938,23 @@ server.registerTool(
     const bundlePath = resolve(pluginRoot, "cli.bundle.mjs");
     const fallbackPath = resolve(pluginRoot, "build", "cli.js");
 
+    // Clean up insight-cache on upgrade so next ctx_insight does fresh build
+    try {
+      const sessDir = getSessionDir();
+      const insightCacheDir = join(dirname(sessDir), "insight-cache");
+      if (existsSync(insightCacheDir)) {
+        // Kill any running insight server first
+        try {
+          if (process.platform === "win32") {
+            execSync('for /f "tokens=5" %a in (\'netstat -ano ^| findstr :4747\') do taskkill /F /PID %a', { stdio: "pipe" });
+          } else {
+            execSync("lsof -ti:4747 | xargs kill 2>/dev/null", { stdio: "pipe" });
+          }
+        } catch { /* no process to kill */ }
+        rmSync(insightCacheDir, { recursive: true, force: true });
+      }
+    } catch { /* best effort — don't block upgrade */ }
+
     let cmd: string;
 
     if (existsSync(bundlePath)) {
@@ -2145,6 +2162,7 @@ server.registerTool(
 
     try {
       const steps: string[] = [];
+      let sourceUpdated = false;
 
       // Ensure cache dir
       mkdirSync(cacheDir, { recursive: true });
@@ -2158,11 +2176,12 @@ server.registerTool(
         steps.push("Copying source files...");
         cpSync(insightSource, cacheDir, { recursive: true, force: true });
         steps.push("Source files copied.");
+        sourceUpdated = true;
       }
 
-      // Install deps if needed
+      // Install deps if needed (also reinstall when source updated and package.json may have changed)
       const hasNodeModules = existsSync(join(cacheDir, "node_modules"));
-      if (!hasNodeModules) {
+      if (!hasNodeModules || sourceUpdated) {
         steps.push("Installing dependencies (first run, ~30s)...");
         try {
           execSync(process.platform === "win32" ? "npm.cmd install --production=false" : "npm install --production=false", {
@@ -2192,7 +2211,8 @@ server.registerTool(
       });
       steps.push("Build complete.");
 
-      // Pre-check: is port already in use? (prevents orphan zombie processes)
+      // Pre-check: is port already in use?
+      let portOccupied = false;
       try {
         const { request } = await import("node:http");
         await new Promise<void>((resolve, reject) => {
@@ -2204,9 +2224,26 @@ server.registerTool(
           req.on("timeout", () => { req.destroy(); reject(); });
           req.end();
         });
-        // If we get here, port is already responding
+        portOccupied = true;
+      } catch {
+        // Port is free, proceed with spawn
+      }
+
+      if (portOccupied && sourceUpdated) {
+        // Source was updated but stale server is running on port — kill it so fresh code runs
+        steps.push("Killing stale dashboard server (source updated)...");
+        try {
+          if (process.platform === "win32") {
+            execSync(`for /f "tokens=5" %a in ('netstat -ano ^| findstr :${port}') do taskkill /F /PID %a`, { stdio: "pipe" });
+          } else {
+            execSync(`lsof -ti:${port} | xargs kill 2>/dev/null`, { stdio: "pipe" });
+          }
+          await new Promise(r => setTimeout(r, 500)); // Wait for port to free
+        } catch { /* no process to kill — proceed anyway */ }
+        steps.push("Stale server killed.");
+      } else if (portOccupied) {
+        // Source unchanged, server is running fine — just open browser
         steps.push("Dashboard already running.");
-        // Open browser anyway
         const url = `http://localhost:${port}`;
         const platform = process.platform;
         try {
@@ -2217,8 +2254,6 @@ server.registerTool(
         return trackResponse("ctx_insight", {
           content: [{ type: "text" as const, text: `Dashboard already running at http://localhost:${port}` }],
         });
-      } catch {
-        // Port is free, proceed with spawn
       }
 
       // Kill any previous insight child this MCP spawned (e.g. re-invocation).
