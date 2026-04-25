@@ -49,18 +49,32 @@ function commandExists(cmd: string): boolean {
 
 function bunExists(): boolean {
   if (commandExists("bun")) return true;
-  // Bun installs to ~/.bun/bin which may not be in PATH in MCP server environments
-  if (!isWindows) {
-    const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
-    if (home && existsSync(`${home}/.bun/bin/bun`)) return true;
+  for (const p of bunFallbackPaths()) {
+    if (existsSync(p)) return true;
   }
   return false;
 }
 
 function bunCommand(): string {
   if (commandExists("bun")) return "bun";
+  for (const p of bunFallbackPaths()) {
+    if (existsSync(p)) return p;
+  }
   const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
-  return `${home}/.bun/bin/bun`;
+  return isWindows ? `${home}\\.bun\\bin\\bun.exe` : `${home}/.bun/bin/bun`;
+}
+
+/** Fallback paths where Bun may be installed but not on PATH. */
+function bunFallbackPaths(): string[] {
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+  if (isWindows) {
+    const localAppData = process.env.LOCALAPPDATA ?? "";
+    return [
+      ...(home ? [`${home}\\.bun\\bin\\bun.exe`] : []),
+      ...(localAppData ? [`${localAppData}\\bun\\bin\\bun.exe`] : []),
+    ];
+  }
+  return home ? [`${home}/.bun/bin/bun`] : [];
 }
 
 /**

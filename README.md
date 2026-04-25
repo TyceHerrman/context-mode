@@ -479,6 +479,56 @@ Full documentation: [`docs/adapters/openclaw.md`](docs/adapters/openclaw.md)
 </details>
 
 <details>
+<summary><strong>Qwen Code</strong> — MCP + hooks (identical wire protocol to Claude Code)</summary>
+
+**Prerequisites:** Node.js 18+, Qwen Code installed (`npm install -g @qwen-code/qwen-code`).
+
+1. Install context-mode:
+
+   ```bash
+   npm install -g context-mode
+   ```
+
+2. Add context-mode as an MCP server. Add to `~/.qwen/settings.json`:
+
+   ```json
+   {
+     "mcpServers": {
+       "context-mode": {
+         "command": "context-mode",
+         "args": []
+       }
+     }
+   }
+   ```
+
+3. Add hooks for routing enforcement and session tracking. Add to `~/.qwen/settings.json`:
+
+   ```json
+   {
+     "hooks": {
+       "PreToolUse": [{ "matcher": "", "hooks": [{ "type": "command", "command": "node $(npm root -g)/context-mode/hooks/pretooluse.mjs" }] }],
+       "PostToolUse": [{ "matcher": "", "hooks": [{ "type": "command", "command": "node $(npm root -g)/context-mode/hooks/posttooluse.mjs" }] }],
+       "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": "node $(npm root -g)/context-mode/hooks/sessionstart.mjs" }] }]
+     }
+   }
+   ```
+
+4. Copy routing instructions:
+
+   ```bash
+   cp $(npm root -g)/context-mode/configs/qwen-code/QWEN.md ./QWEN.md
+   ```
+
+5. Restart Qwen Code.
+
+**Verify:** Start a session and type `ctx stats`. Context-mode tools should appear and respond.
+
+**Note:** Qwen Code uses the same hook wire protocol as Claude Code (JSON stdin/stdout, same event names). Auto-detected via MCP clientInfo (`qwen-cli-mcp-client-*`) or `QWEN_PROJECT_DIR` env var.
+
+</details>
+
+<details>
 <summary><strong>Antigravity</strong> — MCP-only, no hooks</summary>
 
 **Prerequisites:** Node.js 18+, Antigravity installed.
@@ -890,18 +940,18 @@ Detailed event data is also indexed into FTS5 for on-demand retrieval via `searc
 
 ## Platform Compatibility
 
-| Feature | Claude Code | Gemini CLI | VS Code Copilot | Cursor | OpenCode | KiloCode | OpenClaw | Codex CLI | Antigravity | Kiro | Zed | Pi |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| MCP Server | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
-| PreToolUse Hook | Yes | Yes | Yes | Yes | Plugin | Plugin | Plugin | Yes | -- | Yes | -- | Yes (extension) |
-| PostToolUse Hook | Yes | Yes | Yes | Yes | Plugin | Plugin | Plugin | Yes | -- | Yes | -- | Yes (extension) |
-| SessionStart Hook | Yes | Yes | Yes | -- | -- | -- | Plugin | Yes | -- | -- | -- | Yes (extension) |
-| PreCompact Hook | Yes | Yes | Yes | -- | Plugin | Plugin | Plugin | -- | -- | -- | -- | Yes (extension) |
-| Can Modify Args | Yes | Yes | Yes | Yes | Plugin | Plugin | Plugin | -- | -- | -- | -- | Yes (extension) |
-| Can Block Tools | Yes | Yes | Yes | Yes | Plugin | Plugin | Plugin | Yes | -- | Yes | -- | Yes (extension) |
-| Utility Commands (ctx) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes (/ctx-stats, /ctx-doctor) |
-| Slash Commands | Yes | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
-| Plugin Marketplace | Yes | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
+| Feature | Claude Code | Qwen Code | Gemini CLI | VS Code Copilot | Cursor | OpenCode | KiloCode | OpenClaw | Codex CLI | Antigravity | Kiro | Zed | Pi |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| MCP Server | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| PreToolUse Hook | Yes | Yes | Yes | Yes | Yes | Plugin | Plugin | Plugin | Yes | -- | Yes | -- | Yes (extension) |
+| PostToolUse Hook | Yes | Yes | Yes | Yes | Yes | Plugin | Plugin | Plugin | Yes | -- | Yes | -- | Yes (extension) |
+| SessionStart Hook | Yes | Yes | Yes | Yes | -- | -- | -- | Plugin | Yes | -- | -- | -- | Yes (extension) |
+| PreCompact Hook | Yes | Yes | Yes | Yes | -- | Plugin | Plugin | Plugin | -- | -- | -- | -- | Yes (extension) |
+| Can Modify Args | Yes | Yes | Yes | Yes | Yes | Plugin | Plugin | Plugin | -- | -- | -- | -- | Yes (extension) |
+| Can Block Tools | Yes | Yes | Yes | Yes | Yes | Plugin | Plugin | Plugin | Yes | -- | Yes | -- | Yes (extension) |
+| Utility Commands (ctx) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes (/ctx-stats, /ctx-doctor) |
+| Slash Commands | Yes | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
+| Plugin Marketplace | Yes | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
 
 > **OpenCode** uses a TypeScript plugin paradigm — hooks run as in-process functions via `tool.execute.before`, `tool.execute.after`, and `experimental.session.compacting`, providing the same routing enforcement and session continuity as shell-based hooks. SessionStart is not yet available ([#14808](https://github.com/sst/opencode/issues/14808)), but compaction recovery works via the plugin's compacting hook.
 >
