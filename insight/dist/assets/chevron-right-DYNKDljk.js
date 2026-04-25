@@ -1,1 +1,0 @@
-import{f as e}from"./utils--amfM3u0.js";var t=e(`chevron-right`,[[`path`,{d:`m9 18 6-6-6-6`,key:`mthhwq`}]]);export{t};
