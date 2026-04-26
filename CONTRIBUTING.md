@@ -351,7 +351,7 @@ Required information:
 ## Submitting a Pull Request
 
 1. Fork the repository
-2. Create a feature branch from `main`
+2. Create a feature branch from `next`
 3. Follow the local development setup above
 4. Write tests first (TDD)
 5. Run `npm test` and `npm run typecheck`
