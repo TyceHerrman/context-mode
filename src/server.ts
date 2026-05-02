@@ -484,7 +484,11 @@ function checkFilePathDenyPolicy(
   toolName: string,
 ): ToolResult | null {
   try {
-    const projectDir = process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
+    // Use the canonical getProjectDir() helper so deny-policy enforcement
+    // works on every supported adapter. The previous shortcut skipped the
+    // full env cascade and either failed open on non-Claude hosts or
+    // matched against an unrelated repo's deny rules.
+    const projectDir = getProjectDir();
     const denyGlobs = readToolDenyPatterns("Read", projectDir);
     const result = evaluateFilePath(
       filePath,
