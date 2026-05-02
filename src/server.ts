@@ -33,7 +33,7 @@ import { getWorktreeSuffix, SessionDB } from "./session/db.js";
 import { searchAllSources } from "./search/unified.js";
 import { buildNodeCommand, type HookAdapter } from "./adapters/types.js";
 import { loadDatabase } from "./db-base.js";
-import { AnalyticsEngine, formatReport } from "./session/analytics.js";
+import { AnalyticsEngine, formatReport, getLifetimeStats } from "./session/analytics.js";
 const __pkg_dir = dirname(fileURLToPath(import.meta.url));
 const VERSION: string = (() => {
   for (const rel of ["../package.json", "./package.json"]) {
@@ -2172,21 +2172,29 @@ server.registerTool(
           const report = engine.queryAll(sessionStats);
           // MCP usage is read-only and cheap; only available when DB exists.
           const mcpUsage = engine.getMcpToolUsage();
-          text = formatReport(report, VERSION, _latestVersion, mcpUsage);
+          // Lifetime stats span every project's SessionDB + auto-memory dir
+          // (Bugs #3/#4); failures are absorbed inside getLifetimeStats so a
+          // corrupt sidecar can never break ctx_stats.
+          const lifetime = getLifetimeStats();
+          text = formatReport(report, VERSION, _latestVersion, { lifetime, mcpUsage });
         } finally {
           sdb.close();
         }
       } else {
-        // No session DB — build a minimal report from runtime stats only
+        // No session DB — build a minimal report from runtime stats only.
+        // Lifetime still meaningful (other projects, auto-memory) so include it.
         const engine = new AnalyticsEngine(createMinimalDb());
         const report = engine.queryAll(sessionStats);
-        text = formatReport(report, VERSION, _latestVersion);
+        const lifetime = getLifetimeStats();
+        text = formatReport(report, VERSION, _latestVersion, { lifetime });
       }
     } catch {
       // Session DB not available or incompatible — build minimal report from runtime stats
       const engine = new AnalyticsEngine(createMinimalDb());
       const report = engine.queryAll(sessionStats);
-      text = formatReport(report, VERSION, _latestVersion);
+      let lifetime;
+      try { lifetime = getLifetimeStats(); } catch { /* never block ctx_stats */ }
+      text = formatReport(report, VERSION, _latestVersion, lifetime ? { lifetime } : undefined);
     }
 
     return trackResponse("ctx_stats", {
