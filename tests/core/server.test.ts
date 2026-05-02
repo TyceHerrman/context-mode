@@ -1655,3 +1655,72 @@ describe("ctx_doctor — resource cleanup regression (#247)", () => {
     }
   }, 35_000);
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Pre-detection session dir (race-condition fix)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Before the MCP `initialize` handshake completes, `_detectedAdapter` is null.
+// Tools called in that window must still resolve a platform-correct sessions
+// dir instead of falling back to hardcoded `~/.claude/context-mode/sessions/`.
+//
+// `getSessionDirSegments` is a sync, env-free map from PlatformId → segments
+// (no adapter instantiation). `getSessionDir` calls `detectPlatform()` (sync,
+// env-var-based) and feeds the result into the map. Falls back to `.claude`
+// only if the map returns null (defensive — covers "unknown" PlatformId).
+
+describe("getSessionDirSegments — sync platform → segments map", () => {
+  test("returns correct segments for every supported platform", async () => {
+    const { getSessionDirSegments } = await import("../../src/adapters/detect.js");
+    expect(getSessionDirSegments("claude-code")).toEqual([".claude"]);
+    expect(getSessionDirSegments("codex")).toEqual([".codex"]);
+    expect(getSessionDirSegments("qwen-code")).toEqual([".qwen"]);
+    expect(getSessionDirSegments("gemini-cli")).toEqual([".gemini"]);
+    expect(getSessionDirSegments("kiro")).toEqual([".kiro"]);
+    expect(getSessionDirSegments("cursor")).toEqual([".cursor"]);
+    expect(getSessionDirSegments("openclaw")).toEqual([".openclaw"]);
+    expect(getSessionDirSegments("vscode-copilot")).toEqual([".vscode"]);
+    expect(getSessionDirSegments("antigravity")).toEqual([".gemini"]);
+    expect(getSessionDirSegments("pi")).toEqual([".pi"]);
+    expect(getSessionDirSegments("kilo")).toEqual([".config", "kilo"]);
+    expect(getSessionDirSegments("opencode")).toEqual([".config", "opencode"]);
+    expect(getSessionDirSegments("zed")).toEqual([".config", "zed"]);
+    expect(getSessionDirSegments("jetbrains-copilot")).toEqual([".config", "JetBrains"]);
+  });
+
+  test("returns null for unknown platform", async () => {
+    const { getSessionDirSegments } = await import("../../src/adapters/detect.js");
+    expect(getSessionDirSegments("unknown")).toBeNull();
+    expect(getSessionDirSegments("not-a-platform")).toBeNull();
+  });
+});
+
+describe("getSessionDir uses pre-detection when adapter not yet detected", () => {
+  const serverSrc = readFileSync(
+    resolve(__dirname, "../../src/server.ts"),
+    "utf-8",
+  );
+
+  test("getSessionDir invokes detectPlatform + getSessionDirSegments before fallback", () => {
+    const fn = serverSrc.match(/function getSessionDir\(\)[\s\S]*?^}/m);
+    expect(fn, "getSessionDir not found in server.ts").not.toBeNull();
+    const body = fn![0];
+    // Pre-detection path must consult detectPlatform() and the sync segments map
+    expect(body).toContain("detectPlatform");
+    expect(body).toContain("getSessionDirSegments");
+  });
+
+  test("getSessionDir falls back to .claude only as last resort", () => {
+    const fn = serverSrc.match(/function getSessionDir\(\)[\s\S]*?^}/m);
+    expect(fn).not.toBeNull();
+    const body = fn![0];
+    // The .claude literal must still appear (last-resort fallback) but only
+    // after both pre-detection branches. Verify the ordering: detectPlatform
+    // call comes before the literal.
+    const detectIdx = body.indexOf("detectPlatform");
+    const claudeIdx = body.indexOf('".claude"');
+    expect(detectIdx).toBeGreaterThan(-1);
+    expect(claudeIdx).toBeGreaterThan(-1);
+    expect(detectIdx).toBeLessThan(claudeIdx);
+  });
+});

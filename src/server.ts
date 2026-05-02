@@ -30,6 +30,7 @@ import { startLifecycleGuard } from "./lifecycle.js";
 import { getWorktreeSuffix, SessionDB } from "./session/db.js";
 import { searchAllSources } from "./search/unified.js";
 import { buildNodeCommand, type HookAdapter } from "./adapters/types.js";
+import { detectPlatform, getSessionDirSegments } from "./adapters/detect.js";
 import { loadDatabase } from "./db-base.js";
 import { AnalyticsEngine, formatReport, getLifetimeStats } from "./session/analytics.js";
 const __pkg_dir = dirname(fileURLToPath(import.meta.url));
@@ -123,10 +124,28 @@ let _insightChild: ChildProcess | null = null;
 
 /**
  * Get the platform-specific sessions directory from the detected adapter.
- * Falls back to ~/.claude/context-mode/sessions/ before adapter detection.
+ *
+ * Pre-detection path (race window before MCP `initialize` completes):
+ * call `detectPlatform()` (sync, env-var-based) and look up segments via
+ * `getSessionDirSegments()` (sync map, no adapter instantiation). This keeps
+ * non-Claude platforms from spilling sessions into `~/.claude/`.
+ *
+ * Last-resort `.claude` fallback only fires if the segments map returns null
+ * (e.g., "unknown" PlatformId) or if anything throws.
  */
 function getSessionDir(): string {
   if (_detectedAdapter) return _detectedAdapter.getSessionDir();
+
+  try {
+    const signal = detectPlatform();
+    const segments = getSessionDirSegments(signal.platform);
+    if (segments) {
+      const dir = join(homedir(), ...segments, "context-mode", "sessions");
+      mkdirSync(dir, { recursive: true });
+      return dir;
+    }
+  } catch { /* fall through to default */ }
+
   const dir = join(homedir(), ".claude", "context-mode", "sessions");
   mkdirSync(dir, { recursive: true });
   return dir;
