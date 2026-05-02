@@ -877,8 +877,146 @@ describe("ctx_index: projectRoot path resolution (#365)", () => {
       expect(indexResp?.error).toBeUndefined();
       const indexText = indexResp?.result?.content?.[0]?.text ?? "";
       expect(indexText).toMatch(/Indexed \d+ section/);
+      // Strengthened (FIX 3/10 C): assert the stored source label equals the
+      // absolute path verbatim. Server defaults source = path when caller does
+      // not pass an explicit source; the response text reports `from: <label>`,
+      // so finding the absolute path here proves the resolver passed it
+      // through intact instead of e.g. silently rewriting under projectDir.
+      expect(indexText).toContain(`from: ${absFile}`);
+
+      // Cross-check the same label round-trips through the FTS5 store: a
+      // ctx_search scoped to source = <abs path> must surface the file's
+      // unique marker. If the new resolver code path were skipped, the
+      // absolute path would not be a valid lookup key here.
+      const searchResp = await awaitRpc(proc, 101, {
+        jsonrpc: "2.0", id: 101, method: "tools/call",
+        params: { name: "ctx_search", arguments: { queries: [uniqueMarker], source: absFile } },
+      });
+      expect(searchResp?.error).toBeUndefined();
+      const searchText = searchResp?.result?.content?.[0]?.text ?? "";
+      expect(searchText).toContain(uniqueMarker);
     } finally {
       try { proc.kill("SIGTERM"); } catch { /* best effort */ }
+    }
+  }, 30_000);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // FIX 3/10 — negative-path coverage for ctx_index path resolution.
+  //
+  // PR #365 added happy-path tests above. The two tests below pin the P0
+  // negative behaviors that those tests miss:
+  //   A. `../` path traversal → currently allowed (trust-boundary policy).
+  //      Pinned so future security-jail PRs surface the policy change here.
+  //   B. ALL `*_PROJECT_DIR` envs unset → resolver falls back to spawned
+  //      server's process.cwd().
+  //   C. (above) Strengthens the absolute-path test with a source-label
+  //      round-trip.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  test("relative `../` path traversal still resolves and reads (current trust-boundary policy)", async () => {
+    // Layout: <baseDir>/escape.md  +  <baseDir>/sub1/sub2 (= projectDir)
+    // From projectDir, "../../escape.md" climbs back to <baseDir>/escape.md.
+    const baseDir = mkdtempSync(join(tmpdir(), "ctx-index-traversal-"));
+    const traversalProjectDir = join(baseDir, "sub1", "sub2");
+    mkdirSync(traversalProjectDir, { recursive: true });
+    const traversalMarker = `ctx-index-traversal-marker-${process.pid}-${Date.now()}`;
+    writeFileSync(
+      join(baseDir, "escape.md"),
+      `# Path traversal target\n\nUnique marker: ${traversalMarker}\n`,
+      "utf-8",
+    );
+
+    const proc = spawnServerWithProjectDir(traversalProjectDir);
+    try {
+      await awaitRpc(proc, 1, {
+        jsonrpc: "2.0", id: 1, method: "initialize",
+        params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "ctx-index-fix3-traversal", version: "1.0" } },
+      });
+      sendRpc(proc, { jsonrpc: "2.0", method: "notifications/initialized" });
+
+      const indexResp = await awaitRpc(proc, 100, {
+        jsonrpc: "2.0", id: 100, method: "tools/call",
+        params: { name: "ctx_index", arguments: { path: "../../escape.md" } },
+      });
+
+      // Current policy: ctx_index trusts the host IDE's project boundary and
+      // does not jail relative paths. A `../` escape that points at a real
+      // file is RESOLVED and READ. If a future security PR introduces a
+      // jail, this assertion will fail and force an explicit policy update.
+      expect(indexResp?.error).toBeUndefined();
+      const indexText = indexResp?.result?.content?.[0]?.text ?? "";
+      expect(indexText).toMatch(/Indexed \d+ section/);
+
+      // Confirm the file's contents actually entered the store (not a
+      // silent no-op masquerading as success).
+      const searchResp = await awaitRpc(proc, 101, {
+        jsonrpc: "2.0", id: 101, method: "tools/call",
+        params: { name: "ctx_search", arguments: { queries: [traversalMarker] } },
+      });
+      expect(searchResp?.error).toBeUndefined();
+      const searchText = searchResp?.result?.content?.[0]?.text ?? "";
+      expect(searchText).toContain(traversalMarker);
+    } finally {
+      try { proc.kill("SIGTERM"); } catch { /* best effort */ }
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("no *_PROJECT_DIR env set → relative path falls back to spawned-server cwd", async () => {
+    // Strip every project-dir env the resolver chain consults (see
+    // server.ts getProjectDir) so resolution is forced down to process.cwd().
+    // start.mjs would re-set CONTEXT_MODE_PROJECT_DIR and CLAUDE_PROJECT_DIR
+    // from originalCwd — that originalCwd is the `cwd` we hand to spawn(),
+    // which is exactly what we want to assert on.
+    const fallbackCwd = mkdtempSync(join(tmpdir(), "ctx-index-cwdfallback-"));
+    const fallbackFile = "t.md";
+    const fallbackMarker = `ctx-index-cwdfallback-marker-${process.pid}-${Date.now()}`;
+    writeFileSync(
+      join(fallbackCwd, fallbackFile),
+      `# cwd fallback target\n\nUnique marker: ${fallbackMarker}\n`,
+      "utf-8",
+    );
+
+    const strippedEnv: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (typeof v !== "string") continue;
+      if (/_PROJECT_DIR$/.test(k)) continue;
+      if (k === "VSCODE_CWD") continue;
+      strippedEnv[k] = v;
+    }
+    strippedEnv.CONTEXT_MODE_DISABLE_VERSION_CHECK = "1";
+
+    const proc = spawn("node", [mcpEntry], {
+      stdio: ["pipe", "pipe", "pipe"],
+      cwd: fallbackCwd,
+      env: strippedEnv,
+    });
+    try {
+      await awaitRpc(proc, 1, {
+        jsonrpc: "2.0", id: 1, method: "initialize",
+        params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "ctx-index-fix3-cwd", version: "1.0" } },
+      });
+      sendRpc(proc, { jsonrpc: "2.0", method: "notifications/initialized" });
+
+      const indexResp = await awaitRpc(proc, 100, {
+        jsonrpc: "2.0", id: 100, method: "tools/call",
+        params: { name: "ctx_index", arguments: { path: fallbackFile } },
+      });
+
+      expect(indexResp?.error).toBeUndefined();
+      const indexText = indexResp?.result?.content?.[0]?.text ?? "";
+      expect(indexText).toMatch(/Indexed \d+ section/);
+
+      const searchResp = await awaitRpc(proc, 101, {
+        jsonrpc: "2.0", id: 101, method: "tools/call",
+        params: { name: "ctx_search", arguments: { queries: [fallbackMarker] } },
+      });
+      expect(searchResp?.error).toBeUndefined();
+      const searchText = searchResp?.result?.content?.[0]?.text ?? "";
+      expect(searchText).toContain(fallbackMarker);
+    } finally {
+      try { proc.kill("SIGTERM"); } catch { /* best effort */ }
+      rmSync(fallbackCwd, { recursive: true, force: true });
     }
   }, 30_000);
 
