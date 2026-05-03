@@ -2411,3 +2411,90 @@ describe("Blocked-On Events", () => {
     assert.equal(blockerEvents.length, 0);
   });
 });
+
+// ─── SLICE Qwen-4: extractEvents Qwen-aware (Z5b) ───
+describe("Qwen native tool name normalization", () => {
+  test("run_shell_command + git status emits git event", () => {
+    const events = extractEvents({
+      tool_name: "run_shell_command",
+      tool_input: { command: "git status" },
+      tool_response: "On branch main",
+    });
+    const gitEvents = events.filter(e => e.category === "git");
+    assert.equal(gitEvents.length, 1, "git event should be extracted");
+    assert.equal(gitEvents[0].data, "status");
+  });
+
+  test("run_shell_command + cd emits cwd event", () => {
+    const events = extractEvents({
+      tool_name: "run_shell_command",
+      tool_input: { command: "cd /tmp/foo && ls" },
+      tool_response: "",
+    });
+    const cwdEvents = events.filter(e => e.category === "cwd");
+    assert.equal(cwdEvents.length, 1);
+    assert.equal(cwdEvents[0].data, "/tmp/foo");
+  });
+
+  test("read_file emits file_read event", () => {
+    const events = extractEvents({
+      tool_name: "read_file",
+      tool_input: { file_path: "/tmp/a.ts" },
+      tool_response: "code",
+    });
+    const fileEvents = events.filter(e => e.type === "file_read");
+    assert.equal(fileEvents.length, 1);
+    assert.equal(fileEvents[0].data, "/tmp/a.ts");
+  });
+
+  test("write_file emits file_write event", () => {
+    const events = extractEvents({
+      tool_name: "write_file",
+      tool_input: { file_path: "/tmp/b.ts" },
+      tool_response: "ok",
+    });
+    const fileEvents = events.filter(e => e.type === "file_write");
+    assert.equal(fileEvents.length, 1);
+  });
+
+  test("edit emits file_edit event", () => {
+    const events = extractEvents({
+      tool_name: "edit",
+      tool_input: { file_path: "/tmp/c.ts" },
+      tool_response: "ok",
+    });
+    const fileEvents = events.filter(e => e.type === "file_edit");
+    assert.equal(fileEvents.length, 1);
+  });
+
+  test("todo_write emits task event", () => {
+    const events = extractEvents({
+      tool_name: "todo_write",
+      tool_input: { todos: [{ content: "do thing" }] },
+      tool_response: "ok",
+    });
+    const taskEvents = events.filter(e => e.category === "task");
+    assert.equal(taskEvents.length, 1);
+  });
+
+  test("agent emits subagent event", () => {
+    const events = extractEvents({
+      tool_name: "agent",
+      tool_input: { prompt: "investigate the bug" },
+      tool_response: "found it",
+    });
+    const subEvents = events.filter(e => e.category === "subagent");
+    assert.equal(subEvents.length, 1);
+    assert.equal(subEvents[0].type, "subagent_completed");
+  });
+
+  test("read_file with QWEN.md path emits rule event", () => {
+    const events = extractEvents({
+      tool_name: "read_file",
+      tool_input: { file_path: "/proj/QWEN.md" },
+      tool_response: "qwen rules",
+    });
+    const ruleEvents = events.filter(e => e.category === "rule");
+    assert.ok(ruleEvents.length >= 1, "QWEN.md should emit rule event");
+  });
+});

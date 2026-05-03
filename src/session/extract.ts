@@ -986,13 +986,59 @@ export function resetIterationLoopState(): void {
 // ── Public API ─────────────────────────────────────────────────────────────
 
 /**
+ * Map platform-native tool names (Qwen Code, Gemini CLI, OpenCode, etc.) to the
+ * canonical Claude Code names this extractor branches on. Without this, Qwen's
+ * `run_shell_command` events would silently produce zero git/cwd/env extractions.
+ *
+ * Evidence: refs/platforms/qwen-code/packages/core/src/tools/tool-names.ts
+ */
+const TOOL_NAME_NORMALIZE: Record<string, string> = {
+  // Qwen Code / Gemini CLI native names
+  run_shell_command: "Bash",
+  read_file: "Read",
+  read_many_files: "Read",
+  grep_search: "Grep",
+  search_file_content: "Grep",
+  web_fetch: "WebFetch",
+  write_file: "Write",
+  edit: "Edit",
+  glob: "Glob",
+  todo_write: "TodoWrite",
+  ask_user_question: "AskUserQuestion",
+  list_directory: "LS",
+  save_memory: "Memory",
+  skill: "Skill",
+  exit_plan_mode: "ExitPlanMode",
+  agent: "Agent",
+  // OpenCode native names
+  bash: "Bash",
+  view: "Read",
+  grep: "Grep",
+  fetch: "WebFetch",
+  // Codex CLI
+  shell: "Bash",
+  shell_command: "Bash",
+  exec_command: "Bash",
+  "container.exec": "Bash",
+  local_shell: "Bash",
+  grep_files: "Grep",
+};
+
+function normalizeHookInput(input: HookInput): HookInput {
+  const normalized = TOOL_NAME_NORMALIZE[input.tool_name];
+  if (!normalized || normalized === input.tool_name) return input;
+  return { ...input, tool_name: normalized };
+}
+
+/**
  * Extract session events from a PostToolUse hook input.
  *
  * Accepts the raw hook JSON shape (snake_case keys) as received from stdin.
  * Returns an array of zero or more SessionEvents. Never throws.
  */
-export function extractEvents(input: HookInput): SessionEvent[] {
+export function extractEvents(rawInput: HookInput): SessionEvent[] {
   try {
+    const input = normalizeHookInput(rawInput);
     const events: SessionEvent[] = [];
 
     // File + Rule (handles Read/Edit/Write)

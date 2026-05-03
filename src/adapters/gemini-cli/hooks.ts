@@ -12,9 +12,13 @@ import { buildNodeCommand } from "../types.js";
  * Gemini CLI hook system reference:
  *   - Hooks are registered in ~/.gemini/settings.json under "hooks" key
  *   - Each hook type maps to an array of { matcher, hooks } entries
- *   - Hook names: BeforeTool, AfterTool, PreCompress, SessionStart
+ *   - Hook names: BeforeAgent, BeforeTool, AfterTool, PreCompress, SessionStart
  *   - Input: JSON on stdin
  *   - Output: JSON on stdout (or empty for passthrough)
+ *   - BeforeAgent fires when user submits a prompt — input.prompt carries
+ *     the user message; hookSpecificOutput.additionalContext is appended
+ *     to the prompt (hookRunner.ts:183-197). Equivalent to Claude Code's
+ *     UserPromptSubmit for session-continuity capture.
  */
 
 // ─────────────────────────────────────────────────────────
@@ -23,6 +27,7 @@ import { buildNodeCommand } from "../types.js";
 
 /** Gemini CLI hook types. */
 export const HOOK_TYPES = {
+  BEFORE_AGENT: "BeforeAgent",
   BEFORE_TOOL: "BeforeTool",
   AFTER_TOOL: "AfterTool",
   PRE_COMPRESS: "PreCompress",
@@ -37,6 +42,7 @@ export type HookType = (typeof HOOK_TYPES)[keyof typeof HOOK_TYPES];
 
 /** Map of hook types to their script file names. */
 export const HOOK_SCRIPTS: Record<HookType, string> = {
+  [HOOK_TYPES.BEFORE_AGENT]: "beforeagent.mjs",
   [HOOK_TYPES.BEFORE_TOOL]: "beforetool.mjs",
   [HOOK_TYPES.AFTER_TOOL]: "aftertool.mjs",
   [HOOK_TYPES.PRE_COMPRESS]: "precompress.mjs",

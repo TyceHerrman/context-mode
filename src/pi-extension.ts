@@ -15,7 +15,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { SessionDB } from "./session/db.js";
 import { extractEvents, extractUserEvents } from "./session/extract.js";
 import type { HookInput } from "./session/extract.js";
@@ -52,6 +52,48 @@ const BLOCKED_BASH_PATTERNS: RegExp[] = [
 
 let _db: SessionDB | null = null;
 let _sessionId = "";
+
+// Per-session gate: routing block injected at most once per session_id.
+const _routingInjected: Set<string> = new Set();
+
+// Cached routing-block string (built once per process from hooks/routing-block.mjs).
+let _routingBlock: string | null = null;
+async function getRoutingBlock(pluginRoot: string): Promise<string> {
+  if (_routingBlock !== null) return _routingBlock;
+  try {
+    const routingMod = await import(
+      pathToFileURL(join(pluginRoot, "hooks", "routing-block.mjs")).href
+    );
+    const namingMod = await import(
+      pathToFileURL(join(pluginRoot, "hooks", "core", "tool-naming.mjs")).href
+    );
+    const t = namingMod.createToolNamer("pi");
+    _routingBlock = String(routingMod.createRoutingBlock(t));
+  } catch {
+    _routingBlock = "";
+  }
+  return _routingBlock;
+}
+
+// Cached buildAutoInjection (500-token cap, prioritized).
+let _buildAutoInjection:
+  | ((events: Array<{ category: string; data: string }>) => string)
+  | null
+  | undefined = undefined;
+async function getAutoInjection(
+  pluginRoot: string,
+): Promise<((events: Array<{ category: string; data: string }>) => string) | null> {
+  if (_buildAutoInjection !== undefined) return _buildAutoInjection;
+  try {
+    const mod = await import(
+      pathToFileURL(join(pluginRoot, "hooks", "auto-injection.mjs")).href
+    );
+    _buildAutoInjection = mod.buildAutoInjection;
+  } catch {
+    _buildAutoInjection = null;
+  }
+  return _buildAutoInjection ?? null;
+}
 
 // ── Helpers ──────────────────────────────────────────────
 
@@ -256,9 +298,9 @@ export default function piExtension(pi: any): void {
     }
   });
 
-  // ── 4. before_agent_start — Resume injection + user events ─
+  // ── 4. before_agent_start — Routing + active_memory + resume injection ─
 
-  pi.on("before_agent_start", (event: any) => {
+  pi.on("before_agent_start", async (event: any) => {
     try {
       if (!_sessionId) return;
 
@@ -272,43 +314,110 @@ export default function piExtension(pi: any): void {
         }
       }
 
-      // Check for unconsumed resume snapshot
-      const resume = db.getResume(_sessionId);
-      if (!resume || resume.consumed) return;
-
-      // Build FTS5 active memory from the current prompt
-      const stats = db.getSessionStats(_sessionId);
-      if ((stats?.compact_count ?? 0) === 0) return;
-
-      // Mark resume as consumed so it is not re-injected
-      db.markResumeConsumed(_sessionId);
-
-      // Build memory context from recent high-priority events
-      const allEvents = db.getEvents(_sessionId, { minPriority: 3, limit: 50 });
-      let memoryContext = "";
-      if (allEvents.length > 0) {
-        const memoryLines: string[] = ["<active_memory>"];
-        for (const ev of allEvents) {
-          memoryLines.push(
-            `  <event type="${ev.type}" category="${ev.category}">${ev.data}</event>`,
-          );
-        }
-        memoryLines.push("</active_memory>");
-        memoryContext = memoryLines.join("\n");
-      }
-
-      // Compose the augmented system prompt
       const existingPrompt = String(event?.systemPrompt ?? "");
       const parts: string[] = [];
       if (existingPrompt) parts.push(existingPrompt);
-      if (resume.snapshot) parts.push(resume.snapshot);
-      if (memoryContext) parts.push(memoryContext);
 
-      if (parts.length > (existingPrompt ? 1 : 0)) {
+      // Pi-1: Inject routing block once per session (gated by _routingInjected).
+      // v1.0.107 — visible marker so Pi users can verify the routing block
+      // reached the model (Mickey-class verification path; mirrors OpenCode).
+      if (!_routingInjected.has(_sessionId)) {
+        const routingBlock = await getRoutingBlock(pluginRoot);
+        if (routingBlock) {
+          const marker = `<!-- context-mode: routing block injected (sessionID=${String(_sessionId).slice(0, 8)}) -->`;
+          parts.push(marker + "\n" + routingBlock);
+          _routingInjected.add(_sessionId);
+        }
+      }
+
+      // Pi-3 + Pi-4: Always build active_memory (not just post-compact),
+      // capped at 500 tokens via buildAutoInjection. Falls back to inline
+      // budget loop if the helper is unavailable.
+      const activeEvents = db.getEvents(_sessionId, {
+        minPriority: 3,
+        limit: 50,
+      });
+      if (activeEvents.length > 0) {
+        const buildAuto = await getAutoInjection(pluginRoot);
+        let memoryContext = "";
+        if (buildAuto) {
+          memoryContext = buildAuto(
+            activeEvents.map((e: any) => ({
+              category: String(e.category ?? ""),
+              data: String(e.data ?? ""),
+            })),
+          );
+        }
+        // Fallback (or if helper produced empty output): inline 500-token cap.
+        if (!memoryContext) {
+          const memoryLines: string[] = ["<active_memory>"];
+          let budget = 2000; // ~500 tokens at 4 chars/token
+          for (const ev of activeEvents) {
+            const line = `  <event type="${ev.type}" category="${ev.category}">${ev.data}</event>`;
+            if (line.length > budget) break;
+            memoryLines.push(line);
+            budget -= line.length;
+          }
+          memoryLines.push("</active_memory>");
+          if (memoryLines.length > 2) memoryContext = memoryLines.join("\n");
+        }
+        if (memoryContext) parts.push(memoryContext);
+      }
+
+      // Resume snapshot (only when present and unconsumed).
+      const resume = db.getResume(_sessionId);
+      if (resume && !resume.consumed && resume.snapshot) {
+        parts.push(resume.snapshot);
+        db.markResumeConsumed(_sessionId);
+      }
+
+      // Return modified systemPrompt only if we added something beyond existing.
+      const baseLen = existingPrompt ? 1 : 0;
+      if (parts.length > baseLen) {
         return { systemPrompt: parts.join("\n\n") };
       }
     } catch {
       // best effort — never break agent start
+    }
+  });
+
+  // ── 4b. before_provider_response — capture response metadata ───
+  // Pi-2: Register the missing event so providers can record latency,
+  // model, and token usage when Pi exposes them. Best-effort only;
+  // the handler must never throw or modify the response.
+
+  pi.on("before_provider_response", (event: any) => {
+    try {
+      if (!_sessionId) return;
+      const meta = {
+        model: event?.model ?? event?.providerModel,
+        provider: event?.provider,
+        latencyMs: event?.latencyMs ?? event?.latency,
+        tokens: event?.usage ?? event?.tokens,
+      };
+      // Skip when Pi gives us nothing useful — avoids noise in the DB.
+      if (
+        meta.model == null &&
+        meta.provider == null &&
+        meta.latencyMs == null &&
+        meta.tokens == null
+      ) {
+        return;
+      }
+      const data = JSON.stringify(meta);
+      db.insertEvent(
+        _sessionId,
+        {
+          type: "provider_response",
+          category: "pi",
+          data,
+          priority: 1,
+          data_hash: createHash("sha256").update(data).digest("hex").slice(0, 16),
+        },
+        "PostToolUse",
+      );
+    } catch {
+      // best effort — never break provider response
     }
   });
 
@@ -351,6 +460,7 @@ export default function piExtension(pi: any): void {
         _db.cleanupOldSessions(7);
       }
       _db = null;
+      _routingInjected.clear();
       _sessionId = "";
     } catch {
       // best effort — never throw during shutdown

@@ -21,7 +21,10 @@ describe("CursorAdapter", () => {
     it("enables native Cursor v1 hooks without preCompact", () => {
       expect(adapter.capabilities.preToolUse).toBe(true);
       expect(adapter.capabilities.postToolUse).toBe(true);
-      expect(adapter.capabilities.sessionStart).toBe(false);
+      // Cursor-1 fix: sessionStart capability must align with the
+      // hooks/cursor/sessionstart.mjs script + dispatcher entry that ship
+      // with this build.
+      expect(adapter.capabilities.sessionStart).toBe(true);
       expect(adapter.capabilities.preCompact).toBe(false);
       expect(adapter.capabilities.canModifyArgs).toBe(true);
       expect(adapter.capabilities.canModifyOutput).toBe(false);
@@ -301,6 +304,45 @@ describe("CursorAdapter", () => {
     it("parseAfterAgentResponseInput extracts text", () => {
       const event = adapter.parseAfterAgentResponseInput({ text: "Here is the code..." });
       expect(event.text).toBe("Here is the code...");
+    });
+
+    // Cursor-2 fix: registering afterAgentResponse in generateHookConfig +
+    // configureAllHooks without a backing script produced a dangling entry —
+    // Cursor would invoke `context-mode hook cursor afteragentresponse` and
+    // the dispatcher would exit(1). Verify both the dispatcher entry and the
+    // script file actually exist on disk.
+    it("ships afteragentresponse.mjs script for the registered hook entry", () => {
+      const scriptPath = join(
+        process.cwd(),
+        "hooks",
+        "cursor",
+        "afteragentresponse.mjs",
+      );
+      expect(existsSync(scriptPath)).toBe(true);
+    });
+  });
+
+  describe("capability ↔ script alignment", () => {
+    // Cursor-1 RED test: every capability flag set to true MUST have a
+    // matching hook script on disk. A capability without a script means the
+    // adapter advertises functionality the runtime cannot deliver.
+    it("each enabled hook capability has a backing script in hooks/cursor", () => {
+      const hooksDir = join(process.cwd(), "hooks", "cursor");
+      const capabilityToScript: Record<string, string> = {
+        preToolUse: "pretooluse.mjs",
+        postToolUse: "posttooluse.mjs",
+        sessionStart: "sessionstart.mjs",
+      };
+
+      for (const [capability, script] of Object.entries(capabilityToScript)) {
+        const enabled = (adapter.capabilities as Record<string, unknown>)[capability];
+        if (enabled === true) {
+          expect(
+            existsSync(join(hooksDir, script)),
+            `capability ${capability}=true requires hooks/cursor/${script}`,
+          ).toBe(true);
+        }
+      }
     });
   });
 

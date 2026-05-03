@@ -38,6 +38,14 @@ import {
   isContextModeHook as isKiroContextModeHook,
 } from "./hooks.js";
 
+/**
+ * Steering integration: we ship a single context-mode-specific routing file
+ * at `configs/kiro/KIRO.md`. Users can copy it into `.kiro/steering/` to opt
+ * into deterministic injection. We do NOT deploy generic SDD scaffolds (e.g.
+ * cc-sdd's product/structure/tech + steering-custom/* templates) — those are
+ * project-template content, not adapter wiring.
+ */
+
 import type {
   HookAdapter,
   HookParadigm,
@@ -82,10 +90,10 @@ export class KiroAdapter extends BaseAdapter implements HookAdapter {
     preToolUse: true,
     postToolUse: true,
     preCompact: false,
-    sessionStart: false,
+    sessionStart: true,        // Kiro agentSpawn = SessionStart equivalent
     canModifyArgs: false,      // Kiro CLI uses exit codes, can't modify input
     canModifyOutput: false,
-    canInjectSessionContext: false,
+    canInjectSessionContext: true, // agentSpawn returns additionalContext via JSON stdout
   };
 
   // ── Input parsing ──────────────────────────────────────
@@ -120,8 +128,16 @@ export class KiroAdapter extends BaseAdapter implements HookAdapter {
     throw new Error("Kiro does not support PreCompact hooks");
   }
 
-  parseSessionStartInput(_raw: unknown): SessionStartEvent {
-    throw new Error("Kiro does not support SessionStart hooks (yet)");
+  parseSessionStartInput(raw: unknown): SessionStartEvent {
+    // Kiro maps agentSpawn -> SessionStart. Stdin shape mirrors codex/CC.
+    const input = (raw ?? {}) as KiroCLIHookInput & { source?: string };
+    const source = (input.source as SessionStartEvent["source"]) ?? "startup";
+    return {
+      source,
+      sessionId: `pid-${process.ppid}`,
+      projectDir: input.cwd ?? process.cwd(),
+      raw,
+    };
   }
 
   // ── Response formatting ────────────────────────────────
@@ -147,8 +163,15 @@ export class KiroAdapter extends BaseAdapter implements HookAdapter {
     return undefined;
   }
 
-  formatSessionStartResponse(_response: SessionStartResponse): unknown {
-    return undefined;
+  formatSessionStartResponse(response: SessionStartResponse): unknown {
+    // Kiro agentSpawn returns the same hookSpecificOutput shape as CC SessionStart.
+    if (!response?.context) return undefined;
+    return {
+      hookSpecificOutput: {
+        hookEventName: "agentSpawn",
+        additionalContext: response.context,
+      },
+    };
   }
 
   // ── Configuration ──────────────────────────────────────
@@ -172,8 +195,8 @@ export class KiroAdapter extends BaseAdapter implements HookAdapter {
   }
 
   generateHookConfig(pluginRoot: string): HookRegistration {
-    // Kiro CLI hook config format: { preToolUse: [{ matcher, command }] }
-    // Note: This generates the entries for agent config files
+    // Kiro CLI hook config format: { <hookName>: [{ matcher, command }] }
+    // Note: This generates the entries for agent config files (~/.kiro/agents/*.json).
     return {
       [KIRO_HOOK_TYPES.PRE_TOOL_USE]: [{
         matcher: KIRO_PRE_TOOL_USE_MATCHER_PATTERN,
@@ -182,6 +205,14 @@ export class KiroAdapter extends BaseAdapter implements HookAdapter {
       [KIRO_HOOK_TYPES.POST_TOOL_USE]: [{
         matcher: "*",
         hooks: [{ type: "command", command: buildKiroHookCommand(KIRO_HOOK_TYPES.POST_TOOL_USE, pluginRoot) }],
+      }],
+      [KIRO_HOOK_TYPES.AGENT_SPAWN]: [{
+        matcher: "*",
+        hooks: [{ type: "command", command: buildKiroHookCommand(KIRO_HOOK_TYPES.AGENT_SPAWN, pluginRoot) }],
+      }],
+      [KIRO_HOOK_TYPES.USER_PROMPT_SUBMIT]: [{
+        matcher: "*",
+        hooks: [{ type: "command", command: buildKiroHookCommand(KIRO_HOOK_TYPES.USER_PROMPT_SUBMIT, pluginRoot) }],
       }],
     };
   }
@@ -317,26 +348,24 @@ export class KiroAdapter extends BaseAdapter implements HookAdapter {
 
       const hooks = (config.hooks ?? {}) as Record<string, unknown[]>;
 
-      // Add preToolUse hook if not present
-      const preToolUseEntries = (hooks[KIRO_HOOK_TYPES.PRE_TOOL_USE] ?? []) as Array<Record<string, unknown>>;
-      if (!preToolUseEntries.some(e => isKiroContextModeHook(e as { command?: string }, KIRO_HOOK_TYPES.PRE_TOOL_USE))) {
-        preToolUseEntries.push({
-          matcher: KIRO_PRE_TOOL_USE_MATCHER_PATTERN,
-          command: buildKiroHookCommand(KIRO_HOOK_TYPES.PRE_TOOL_USE, pluginRoot),
-        });
-        hooks[KIRO_HOOK_TYPES.PRE_TOOL_USE] = preToolUseEntries;
-        changes.push(`Added ${KIRO_HOOK_TYPES.PRE_TOOL_USE} hook to ${defaultAgent}`);
-      }
+      // Hooks to add: [hookType, matcher]
+      const hookSpecs: Array<[string, string]> = [
+        [KIRO_HOOK_TYPES.PRE_TOOL_USE, KIRO_PRE_TOOL_USE_MATCHER_PATTERN],
+        [KIRO_HOOK_TYPES.POST_TOOL_USE, "*"],
+        [KIRO_HOOK_TYPES.AGENT_SPAWN, "*"],
+        [KIRO_HOOK_TYPES.USER_PROMPT_SUBMIT, "*"],
+      ];
 
-      // Add postToolUse hook if not present
-      const postToolUseEntries = (hooks[KIRO_HOOK_TYPES.POST_TOOL_USE] ?? []) as Array<Record<string, unknown>>;
-      if (!postToolUseEntries.some(e => isKiroContextModeHook(e as { command?: string }, KIRO_HOOK_TYPES.POST_TOOL_USE))) {
-        postToolUseEntries.push({
-          matcher: "*",
-          command: buildKiroHookCommand(KIRO_HOOK_TYPES.POST_TOOL_USE, pluginRoot),
-        });
-        hooks[KIRO_HOOK_TYPES.POST_TOOL_USE] = postToolUseEntries;
-        changes.push(`Added ${KIRO_HOOK_TYPES.POST_TOOL_USE} hook to ${defaultAgent}`);
+      for (const [hookType, matcher] of hookSpecs) {
+        const entries = (hooks[hookType] ?? []) as Array<Record<string, unknown>>;
+        if (!entries.some(e => isKiroContextModeHook(e as { command?: string }, hookType))) {
+          entries.push({
+            matcher,
+            command: buildKiroHookCommand(hookType, pluginRoot),
+          });
+          hooks[hookType] = entries;
+          changes.push(`Added ${hookType} hook to ${defaultAgent}`);
+        }
       }
 
       config.hooks = hooks;

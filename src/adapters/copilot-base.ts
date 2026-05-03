@@ -70,9 +70,12 @@ export interface CopilotHookModule {
     readonly POST_TOOL_USE: string;
     readonly PRE_COMPACT: string;
     readonly SESSION_START: string;
-    readonly STOP: string;
-    readonly SUBAGENT_START: string;
-    readonly SUBAGENT_STOP: string;
+    // Optional — vscode-copilot dropped these (no scripts present, samples
+    // confirm not blocking). Other Copilot platforms (e.g. jetbrains) may
+    // still surface them as orphan declarations until their script set lands.
+    readonly STOP?: string;
+    readonly SUBAGENT_START?: string;
+    readonly SUBAGENT_STOP?: string;
   };
   HOOK_SCRIPTS: Record<string, string>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

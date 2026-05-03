@@ -86,7 +86,10 @@ export class CursorAdapter extends BaseAdapter implements HookAdapter {
     preToolUse: true,
     postToolUse: true,
     preCompact: false,
-    sessionStart: false,
+    // Cursor v1 ships native sessionStart and the matching hook script
+    // (hooks/cursor/sessionstart.mjs) is wired through the dispatcher
+    // (src/cli.ts HOOK_MAP). Capability flag must reflect script presence.
+    sessionStart: true,
     canModifyArgs: true,
     canModifyOutput: false,
     canInjectSessionContext: true,

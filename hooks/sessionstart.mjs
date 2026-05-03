@@ -17,9 +17,11 @@ import "./ensure-deps.mjs";
 
 import { createRoutingBlock } from "./routing-block.mjs";
 import { createToolNamer } from "./core/tool-naming.mjs";
+import { detectPlatformFromEnv } from "./core/platform-detect.mjs";
 import { buildAutoInjection } from "./auto-injection.mjs";
 
-const toolNamer = createToolNamer("claude-code");
+const detectedPlatform = detectPlatformFromEnv();
+const toolNamer = createToolNamer(detectedPlatform);
 const ROUTING_BLOCK = createRoutingBlock(toolNamer);
 import { readStdin, parseStdin, getSessionId, getSessionDBPath, getSessionEventsPath, getCleanupFlagPath, resolveConfigDir } from "./session-helpers.mjs";
 import { writeSessionEventsFile, buildSessionDirective, getSessionEvents } from "./session-directive.mjs";

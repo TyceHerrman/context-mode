@@ -516,6 +516,152 @@ describe("Pi Extension", () => {
   });
 
   // ═══════════════════════════════════════════════════════════
+  // Slice 7: Routing block injection (Pi-1)
+  // ═══════════════════════════════════════════════════════════
+
+  describe("Slice 7: Routing block injection", () => {
+    it("injects <context_window_protection> on first before_agent_start", async () => {
+      await registerPiExtension(api);
+      await api._trigger("session_start", {
+        sessionManager: { getSessionFile: () => `routing-1-${Date.now()}-${Math.random()}` },
+      });
+
+      const result = await api._trigger("before_agent_start", {
+        systemPrompt: "Base prompt.",
+      });
+
+      expect(result?.systemPrompt).toBeDefined();
+      expect(result.systemPrompt).toContain("<context_window_protection>");
+    });
+
+    it("does not re-inject the routing block on subsequent calls", async () => {
+      await registerPiExtension(api);
+      await api._trigger("session_start", {
+        sessionManager: { getSessionFile: () => `routing-2-${Date.now()}-${Math.random()}` },
+      });
+
+      const first = await api._trigger("before_agent_start", {
+        systemPrompt: "Base.",
+      });
+      const second = await api._trigger("before_agent_start", {
+        systemPrompt: "Base.",
+      });
+
+      expect(first?.systemPrompt).toContain("<context_window_protection>");
+      const occurrences = (
+        (second?.systemPrompt ?? "").match(/<context_window_protection>/g) ?? []
+      ).length;
+      expect(occurrences).toBe(0);
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // Slice 8: before_provider_response (Pi-2)
+  // ═══════════════════════════════════════════════════════════
+
+  describe("Slice 8: before_provider_response handler", () => {
+    it("registers a before_provider_response handler", async () => {
+      await registerPiExtension(api);
+      expect(api._handlers["before_provider_response"]).toBeDefined();
+      expect(api._handlers["before_provider_response"].length).toBeGreaterThan(0);
+    });
+
+    it("invokes the handler without throwing on metadata payloads", async () => {
+      await registerPiExtension(api);
+      await api._trigger("session_start", {
+        session_id: "provider-1",
+        project_dir: tempDir,
+      });
+
+      await expect(
+        api._trigger("before_provider_response", {
+          model: "pi-1",
+          provider: "pi",
+          latencyMs: 42,
+          usage: { prompt: 10, completion: 20 },
+        }),
+      ).resolves.not.toThrow();
+    });
+
+    it("handles empty payload gracefully", async () => {
+      await registerPiExtension(api);
+      await expect(
+        api._trigger("before_provider_response", {}),
+      ).resolves.not.toThrow();
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // Slice 9: active_memory always-on + token cap (Pi-3, Pi-4)
+  // ═══════════════════════════════════════════════════════════
+
+  describe("Slice 9: active_memory injection", () => {
+    it("injects <active_memory> even when compact_count is 0", async () => {
+      await registerPiExtension(api);
+      await api._trigger("session_start", {
+        sessionManager: { getSessionFile: () => `active-mem-1-${Date.now()}-${Math.random()}` },
+      });
+
+      // Seed user prompt with role pattern (priority 3) so the extractor
+      // produces a priority>=3 event the active_memory builder can pick up.
+      await api._trigger("before_agent_start", {
+        prompt: "You are a senior staff engineer reviewing this codebase.",
+        systemPrompt: "Base.",
+      });
+
+      // Second call should now contain <active_memory> built from those events.
+      const result = await api._trigger("before_agent_start", {
+        systemPrompt: "Base 2.",
+      });
+
+      expect(result?.systemPrompt).toBeDefined();
+      // Either the auto-injection helper (rules/decisions) OR the inline
+      // fallback (active_memory) should have produced injected content.
+      const sp = String(result.systemPrompt);
+      const hasActiveMemory =
+        sp.includes("<active_memory>") ||
+        sp.includes("<rules>") ||
+        sp.includes("<behavioral_directive>");
+      expect(hasActiveMemory).toBe(true);
+    });
+
+    it("caps active_memory at ≤ 2000 characters", async () => {
+      await registerPiExtension(api);
+      await api._trigger("session_start", {
+        sessionManager: { getSessionFile: () => `active-mem-2-${Date.now()}-${Math.random()}` },
+      });
+
+      // Flood with very long role-pattern prompts (priority 3).
+      const longText = "You are a senior staff engineer. " + "x".repeat(500);
+      for (let i = 0; i < 20; i++) {
+        await api._trigger("before_agent_start", {
+          prompt: `${longText} #${i}`,
+          systemPrompt: "Base.",
+        });
+      }
+
+      const result = await api._trigger("before_agent_start", {
+        systemPrompt: "Base final.",
+      });
+
+      const sp = String(result?.systemPrompt ?? "");
+      // Slice out the injected memory block (auto-injection or fallback).
+      const memMatch =
+        sp.match(/<active_memory>[\s\S]*?<\/active_memory>/) ??
+        sp.match(/<behavioral_directive>[\s\S]*?<\/behavioral_directive>/) ??
+        sp.match(/<rules>[\s\S]*?<\/rules>/);
+      if (memMatch) {
+        // 500 token cap × 4 chars/token = 2000 chars; allow small padding for
+        // XML wrappers from buildAutoInjection / fallback markers.
+        expect(memMatch[0].length).toBeLessThanOrEqual(2200);
+      } else {
+        // If no block exists, the test should surface the failure.
+        expect(memMatch).not.toBeNull();
+      }
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════
   // Registration integrity
   // ═══════════════════════════════════════════════════════════
 

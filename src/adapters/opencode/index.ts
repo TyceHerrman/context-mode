@@ -233,14 +233,20 @@ export class OpenCodeAdapter extends BaseAdapter implements HookAdapter {
 
   private paths(): string[] {
     if (this.platform === "kilo") {
+      // Kilo runtime accepts `.kilo/`, `.kilocode/`, and `.opencode/` as
+      // project config dirs (refs/platforms/kilo/packages/opencode/src/
+      // kilocode/config/config.ts:50,408). Mirror that here so context-mode
+      // discovers config regardless of which suffix the user adopted.
       return [
         resolve("kilo.json"),
         resolve("kilo.jsonc"),
         resolve(".kilo", "kilo.json"),
         resolve(".kilo", "kilo.jsonc"),
+        resolve(".kilocode", "kilo.json"),
+        resolve(".kilocode", "kilo.jsonc"),
         join(homedir(), ".config", "kilo", "kilo.json"),
         join(homedir(), ".config", "kilo", "kilo.jsonc"),
-      ];  
+      ];
     }
     return [
       resolve("opencode.json"),

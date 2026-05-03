@@ -1,9 +1,15 @@
 import "../setup-home";
-import { describe, it, expect, beforeEach } from "vitest";
-import { homedir } from "node:os";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { KiroAdapter } from "../../src/adapters/kiro/index.js";
-import { PRE_TOOL_USE_MATCHER_PATTERN, PRE_TOOL_USE_MATCHERS } from "../../src/adapters/kiro/hooks.js";
+import {
+  PRE_TOOL_USE_MATCHER_PATTERN,
+  PRE_TOOL_USE_MATCHERS,
+  HOOK_TYPES,
+  HOOK_SCRIPTS,
+} from "../../src/adapters/kiro/hooks.js";
 
 describe("KiroAdapter", () => {
   let adapter: KiroAdapter;
@@ -32,15 +38,19 @@ describe("KiroAdapter", () => {
       expect(adapter.capabilities.postToolUse).toBe(true);
     });
 
-    it("does not support preCompact or sessionStart", () => {
+    it("does not support preCompact (no PreCompact hook in Kiro)", () => {
       expect(adapter.capabilities.preCompact).toBe(false);
-      expect(adapter.capabilities.sessionStart).toBe(false);
     });
 
-    it("cannot modify args or output", () => {
+    it("supports sessionStart via agentSpawn", () => {
+      // Kiro maps SessionStart -> agentSpawn (fires once when agent loads).
+      expect(adapter.capabilities.sessionStart).toBe(true);
+      expect(adapter.capabilities.canInjectSessionContext).toBe(true);
+    });
+
+    it("cannot modify args or output (exit-code paradigm)", () => {
       expect(adapter.capabilities.canModifyArgs).toBe(false);
       expect(adapter.capabilities.canModifyOutput).toBe(false);
-      expect(adapter.capabilities.canInjectSessionContext).toBe(false);
     });
   });
 
@@ -77,10 +87,22 @@ describe("KiroAdapter", () => {
       );
     });
 
-    it("parseSessionStartInput throws", () => {
-      expect(() => adapter.parseSessionStartInput({})).toThrow(
-        /Kiro does not support SessionStart/,
-      );
+    it("parseSessionStartInput parses agentSpawn input with default source=startup", () => {
+      const result = adapter.parseSessionStartInput({
+        hook_event_name: "agentSpawn",
+        cwd: "/test/project",
+      });
+      expect(result.source).toBe("startup");
+      expect(result.projectDir).toBe("/test/project");
+    });
+
+    it("parseSessionStartInput honors explicit source field", () => {
+      const result = adapter.parseSessionStartInput({
+        hook_event_name: "agentSpawn",
+        cwd: "/test/project",
+        source: "resume",
+      });
+      expect(result.source).toBe("resume");
     });
   });
 
@@ -120,10 +142,20 @@ describe("KiroAdapter", () => {
       expect(result).toBeUndefined();
     });
 
-    it("formatSessionStartResponse returns undefined", () => {
+    it("formatSessionStartResponse returns hookSpecificOutput with agentSpawn name", () => {
       const result = adapter.formatSessionStartResponse({
-        context: "test",
+        context: "ROUTING_BLOCK",
       });
+      expect(result).toEqual({
+        hookSpecificOutput: {
+          hookEventName: "agentSpawn",
+          additionalContext: "ROUTING_BLOCK",
+        },
+      });
+    });
+
+    it("formatSessionStartResponse returns undefined when no context", () => {
+      const result = adapter.formatSessionStartResponse({});
       expect(result).toBeUndefined();
     });
   });
@@ -166,6 +198,42 @@ describe("KiroAdapter", () => {
     it("setHookPermissions returns empty array", () => {
       const set = adapter.setHookPermissions("/some/plugin/root");
       expect(set).toEqual([]);
+    });
+
+    // ── Slice Kiro-1 (Z7): userPromptSubmit wired ────────
+    it("HOOK_SCRIPTS maps userPromptSubmit -> userpromptsubmit.mjs", () => {
+      expect(HOOK_SCRIPTS[HOOK_TYPES.USER_PROMPT_SUBMIT]).toBe("userpromptsubmit.mjs");
+    });
+
+    it("generateHookConfig wires userPromptSubmit hook", () => {
+      const config = adapter.generateHookConfig("/some/plugin/root");
+      expect(config).toHaveProperty(HOOK_TYPES.USER_PROMPT_SUBMIT);
+      const ups = config[HOOK_TYPES.USER_PROMPT_SUBMIT] as Array<{ hooks: Array<{ command: string }> }>;
+      expect(ups[0].hooks[0].command).toContain("userpromptsubmit.mjs");
+    });
+
+    // ── Slice Kiro-2 (Z8): agentSpawn wired ──────────────
+    it("HOOK_SCRIPTS maps agentSpawn -> agentspawn.mjs", () => {
+      expect(HOOK_SCRIPTS[HOOK_TYPES.AGENT_SPAWN]).toBe("agentspawn.mjs");
+    });
+
+    it("generateHookConfig wires agentSpawn hook", () => {
+      const config = adapter.generateHookConfig("/some/plugin/root");
+      expect(config).toHaveProperty(HOOK_TYPES.AGENT_SPAWN);
+      const as = config[HOOK_TYPES.AGENT_SPAWN] as Array<{ hooks: Array<{ command: string }> }>;
+      expect(as[0].hooks[0].command).toContain("agentspawn.mjs");
+    });
+  });
+
+  // ── Slice Kiro-3 (Z9) reverted: NO scaffold deploy ────────
+  // Initial v1.0.107 SE pass deployed a 10-file generic SDD scaffold (mirror of
+  // cc-sdd's project-template content). Per Mert review: those are end-user
+  // project templates (api-standards, auth, database, deployment, etc.), NOT
+  // adapter wiring. We ship a single context-mode-specific routing file
+  // (`configs/kiro/KIRO.md`) and let users opt in by copying it manually.
+  describe("steering scaffold deploy — reverted (v1.0.107)", () => {
+    it("does NOT expose deploySteeringScaffold (generic SDD scaffold removed)", () => {
+      expect((adapter as unknown as Record<string, unknown>).deploySteeringScaffold).toBeUndefined();
     });
   });
 

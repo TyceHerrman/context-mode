@@ -1,8 +1,10 @@
 import "../setup-home";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { GeminiCLIAdapter } from "../../src/adapters/gemini-cli/index.js";
+import { HOOK_TYPES, HOOK_SCRIPTS } from "../../src/adapters/gemini-cli/hooks.js";
 
 describe("GeminiCLIAdapter", () => {
   let adapter: GeminiCLIAdapter;
@@ -196,6 +198,44 @@ describe("GeminiCLIAdapter", () => {
       const sessionDir = adapter.getSessionDir();
       expect(sessionDir).toBe(
         join(homedir(), ".gemini", "context-mode", "sessions"),
+      );
+    });
+  });
+
+  // ── BeforeAgent hook (UserPromptSubmit equivalent) ────
+
+  describe("BeforeAgent hook", () => {
+    it("HOOK_TYPES declares BeforeAgent (gemini types.ts:547-559)", () => {
+      expect(HOOK_TYPES.BEFORE_AGENT).toBe("BeforeAgent");
+    });
+
+    it("HOOK_SCRIPTS maps BeforeAgent to beforeagent.mjs", () => {
+      expect(HOOK_SCRIPTS["BeforeAgent"]).toBe("beforeagent.mjs");
+    });
+
+    it("hooks/gemini-cli/beforeagent.mjs exists on disk", () => {
+      const scriptPath = resolve(
+        __dirname,
+        "..",
+        "..",
+        "hooks",
+        "gemini-cli",
+        "beforeagent.mjs",
+      );
+      expect(existsSync(scriptPath)).toBe(true);
+    });
+
+    it("generateHookConfig wires BeforeAgent into settings (matcher: '')", () => {
+      const config = adapter.generateHookConfig("/plugin/root") as Record<
+        string,
+        Array<{ matcher?: string; hooks?: Array<{ command?: string; type?: string }> }>
+      >;
+      expect(config["BeforeAgent"]).toBeDefined();
+      expect(config["BeforeAgent"].length).toBe(1);
+      expect(config["BeforeAgent"][0].matcher).toBe("");
+      expect(config["BeforeAgent"][0].hooks?.[0].type).toBe("command");
+      expect(config["BeforeAgent"][0].hooks?.[0].command).toContain(
+        "beforeagent.mjs",
       );
     });
   });

@@ -261,6 +261,56 @@ describe("QwenCodeAdapter", () => {
     });
   });
 
+  // -- configureAllHooks (SLICE Qwen-2: Z6 — all 5 hooks) --------
+
+  describe("configureAllHooks", () => {
+    let tempDir: string;
+    let pluginRoot: string;
+
+    beforeEach(() => {
+      tempDir = mkdtempSync(join(tmpdir(), "qwen-cfg-test-"));
+      pluginRoot = mkdtempSync(join(tmpdir(), "qwen-cfg-plugin-"));
+      Object.defineProperty(adapter, "getSettingsPath", {
+        value: () => join(tempDir, "settings.json"),
+        configurable: true,
+      });
+      writeFileSync(join(tempDir, "settings.json"), JSON.stringify({ hooks: {} }));
+    });
+
+    afterEach(() => {
+      rmSync(tempDir, { recursive: true, force: true });
+      rmSync(pluginRoot, { recursive: true, force: true });
+    });
+
+    it("writes ALL 5 declared hooks (PreToolUse, PostToolUse, SessionStart, PreCompact, UserPromptSubmit)", () => {
+      adapter.configureAllHooks(pluginRoot);
+      const written = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf-8"));
+      const hookKeys = Object.keys(written.hooks ?? {}).sort();
+      expect(hookKeys).toEqual(
+        ["PostToolUse", "PreCompact", "PreToolUse", "SessionStart", "UserPromptSubmit"],
+      );
+    });
+
+    it("each declared hook entry references the matching script", () => {
+      adapter.configureAllHooks(pluginRoot);
+      const written = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf-8"));
+      const expectedScripts: Record<string, string> = {
+        PreToolUse: "pretooluse.mjs",
+        PostToolUse: "posttooluse.mjs",
+        SessionStart: "sessionstart.mjs",
+        PreCompact: "precompact.mjs",
+        UserPromptSubmit: "userpromptsubmit.mjs",
+      };
+      for (const [hookName, script] of Object.entries(expectedScripts)) {
+        const entries = written.hooks[hookName];
+        expect(Array.isArray(entries)).toBe(true);
+        expect(entries.length).toBeGreaterThan(0);
+        const cmd = entries[0].hooks[0].command as string;
+        expect(cmd).toContain(script);
+      }
+    });
+  });
+
   // -- parseSessionStartInput ------------------------------------
 
   describe("parseSessionStartInput", () => {

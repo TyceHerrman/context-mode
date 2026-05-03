@@ -44,6 +44,25 @@ import type { SessionEvent } from "./types.js";
 
 import { WorkspaceRouter } from "./openclaw/workspace-router.js";
 import { buildNodeCommand } from "./adapters/types.js";
+import { OPENCLAW_TOOL_DEFS } from "./openclaw/mcp-tools.js";
+import type { OpenClawToolDef } from "./openclaw/mcp-tools.js";
+
+// ── System-reminder filter (CCv2 — SLICE OClaw-3) ─────────
+// Mirror hooks/userpromptsubmit.mjs:30-33: skip system-generated wrappers
+// so before_model_resolve never inserts spurious user-prompt events.
+const SYSTEM_REMINDER_PREFIXES = [
+  "<system-reminder>",
+  "<task-notification>",
+  "<context_guidance>",
+  "<tool-result>",
+] as const;
+function isSystemReminderMessage(msg: string): boolean {
+  const trimmed = msg.trimStart();
+  for (const prefix of SYSTEM_REMINDER_PREFIXES) {
+    if (trimmed.startsWith(prefix)) return true;
+  }
+  return false;
+}
 
 // ── OpenClaw Plugin API Types ─────────────────────────────
 
@@ -86,6 +105,12 @@ interface OpenClawPluginApi {
     factory: (ctx: { program: unknown }) => void,
     meta: { commands: string[] },
   ): void;
+  /**
+   * Register an agent tool (OpenClaw native registerTool) — see
+   * refs/platforms/openclaw/docs/plugins/building-plugins.md:116. Optional in
+   * the type so we degrade silently on legacy hosts that pre-date this API.
+   */
+  registerTool?(tool: OpenClawToolDef, opts?: { optional?: boolean }): void;
   logger?: {
     info: (...args: unknown[]) => void;
     error: (...args: unknown[]) => void;
@@ -236,6 +261,12 @@ export default {
     // Start with temp UUID — session_start will assign the real ID + sessionKey
     let sessionId = randomUUID();
     log.info("register() called, sessionId:", sessionId.slice(0, 8));
+    // SLICE OClaw-6 (F6 retraction): `resumeInjected` is correctly scoped
+    // per-register() singleton — Phase 7 confirmed F6 fabrication-as-tech-debt.
+    // Each OpenClaw agent session calls register() once and gets its own
+    // closure; the flag prevents double-injection of the resume snapshot in
+    // back-to-back before_prompt_build calls within the same session. Do not
+    // promote to module scope.
     let resumeInjected = false;
     let sessionKey: string | undefined;
     // Create temp session so after_tool_call events before session_start have a valid row
@@ -243,28 +274,46 @@ export default {
 
     const workspaceRouter = new WorkspaceRouter();
 
-    // Load routing instructions synchronously for prompt injection
+    // Async init: load routing module + dynamic routing-block factory.
+    // SLICE OClaw-2: replaced static readFileSync(configs/openclaw/AGENTS.md)
+    // with createRoutingBlock(createToolNamer("openclaw")) so OpenClaw-specific
+    // MCP-prefix substitution stays in lockstep with hooks/routing-block.mjs.
     let routingInstructions = "";
-    try {
-      const instructionsPath = resolve(
-        buildDir,
-        "..",
-        "configs",
-        "openclaw",
-        "AGENTS.md",
-      );
-      if (existsSync(instructionsPath)) {
-        routingInstructions = readFileSync(instructionsPath, "utf-8");
-      }
-    } catch {
-      // best effort
-    }
-
-    // Async init: load routing module. Hooks await this.
     const initPromise = (async () => {
       const routingPath = resolve(buildDir, "..", "hooks", "core", "routing.mjs");
       const routing = await import(pathToFileURL(routingPath).href);
       await routing.initSecurity(buildDir);
+
+      try {
+        const blockMod = await import(
+          pathToFileURL(resolve(buildDir, "..", "hooks", "routing-block.mjs")).href
+        );
+        const namingMod = await import(
+          pathToFileURL(
+            resolve(buildDir, "..", "hooks", "core", "tool-naming.mjs"),
+          ).href
+        );
+        const toolNamer = namingMod.createToolNamer("openclaw");
+        routingInstructions = blockMod.createRoutingBlock(toolNamer);
+      } catch (err) {
+        log.warn?.("failed to build dynamic routing block", err);
+        // Fallback: legacy disk-read of AGENTS.md (kept for resilience only —
+        // primary path is the dynamic factory above).
+        try {
+          const instructionsPath = resolve(
+            buildDir,
+            "..",
+            "configs",
+            "openclaw",
+            "AGENTS.md",
+          );
+          if (existsSync(instructionsPath)) {
+            routingInstructions = readFileSync(instructionsPath, "utf-8");
+          }
+        } catch {
+          // best effort
+        }
+      }
 
       return { routing };
     })();
@@ -542,6 +591,12 @@ export default {
           const messageText = e?.userMessage ?? e?.message ?? e?.content ?? "";
           log.debug("before_model_resolve", { hasMessage: !!messageText });
           if (!messageText) return;
+          // SLICE OClaw-3: skip system-generated wrappers so we never
+          // misclassify them as user prompts. Mirrors hooks/userpromptsubmit.mjs:30-33.
+          if (isSystemReminderMessage(messageText)) {
+            log.debug("before_model_resolve[skip-system-reminder]");
+            return;
+          }
           const events = extractUserEvents(messageText);
           for (const ev of events) {
             db.insertEvent(sid, ev as import("./types.js").SessionEvent, "PostToolUse");
@@ -575,17 +630,92 @@ export default {
     );
 
     // ── 8. before_prompt_build — Routing instruction injection ──
+    // SLICE OClaw-2: register unconditionally; routingInstructions is populated
+    // asynchronously by initPromise. The closure resolves the latest value at
+    // call-time, so the first prompt-build firing after dynamic-import resolution
+    // sees the dynamic ROUTING_BLOCK XML (matching hooks/routing-block.mjs).
 
-    if (routingInstructions) {
-      api.on(
-        "before_prompt_build",
-        () => {
-          log.debug("before_prompt_build[routing]", { hasInstructions: !!routingInstructions });
-          return { appendSystemContext: routingInstructions };
-        },
-        { priority: 5 },
-      );
+    api.on(
+      "before_prompt_build",
+      () => {
+        if (!routingInstructions) return undefined;
+        log.debug("before_prompt_build[routing]", { hasInstructions: !!routingInstructions });
+        // v1.0.107 — visible marker so OpenClaw users can verify the routing
+        // block reached the model (Mickey-class verification path; mirrors
+        // OpenCode + Pi adapters).
+        const marker = `<!-- context-mode: routing block injected (sessionID=${String(sessionId).slice(0, 8)}) -->`;
+        return { appendSystemContext: marker + "\n" + routingInstructions };
+      },
+      { priority: 5 },
+    );
+
+    // ── 8b. registerTool — Expose 11 ctx_* tools (SLICE OClaw-1) ────
+    // Phase 7 audit (v1.0.107-adapter-openclaw.json) flagged severity=CRITICAL:
+    // routing block tells agents to call ctx_execute / ctx_search / etc. but
+    // nothing called api.registerTool, so the tools didn't exist in the
+    // OpenClaw session. This loop fixes that — mirrors swarmvault MCP pattern
+    // (refs/plugin-examples/openclaw/swarmvault/packages/engine/src/mcp.ts:46-51).
+    if (api.registerTool) {
+      for (const def of OPENCLAW_TOOL_DEFS) {
+        try {
+          api.registerTool(def);
+        } catch (err) {
+          log.warn?.("registerTool failed", { name: def.name }, err);
+        }
+      }
+      log.debug("registerTool[ctx_*]", { count: OPENCLAW_TOOL_DEFS.length });
+    } else {
+      log.warn?.("api.registerTool unavailable — ctx_* tools not exposed in this OpenClaw build");
     }
+
+    // ── 8c. session_end — Finalize resume snapshot (SLICE OClaw-4) ───
+    // OpenClaw fires session_end at session lifecycle boundaries (per
+    // refs/platforms/openclaw/docs/plugins/hooks.md:110). We persist a final
+    // resume snapshot so a future session_start with resumedFrom can re-attach.
+    api.on(
+      "session_end",
+      async () => {
+        try {
+          const sid = sessionId;
+          const allEvents = db.getEvents(sid);
+          log.debug("session_end", { sessionId: sid.slice(0, 8), events: allEvents.length });
+          if (allEvents.length === 0) return;
+          const freshStats = db.getSessionStats(sid);
+          const snapshot = buildResumeSnapshot(allEvents, {
+            compactCount: freshStats?.compact_count ?? 0,
+          });
+          db.upsertResume(sid, snapshot, allEvents.length);
+        } catch {
+          // best effort — never break session shutdown
+        }
+      },
+    );
+
+    // ── 8d. subagent_spawning — Inject routing block (SLICE OClaw-5) ─
+    // OpenClaw's subagent lifecycle (hooks.md:116) gives us a chance to seed
+    // every spawned subagent with the same routing block the parent agent
+    // sees. Without this, subagents have no MCP-routing guidance and degrade
+    // back to flooding the context with raw tool output.
+    api.on(
+      "subagent_spawning",
+      (event: unknown) => {
+        try {
+          const e = (event ?? {}) as { input?: { prompt?: string } };
+          const basePrompt = e?.input?.prompt ?? "";
+          if (!routingInstructions) return undefined;
+          const newPrompt = basePrompt
+            ? `${basePrompt}\n\n${routingInstructions}`
+            : routingInstructions;
+          log.debug("subagent_spawning[inject-routing]", {
+            basePromptLen: basePrompt.length,
+            blockLen: routingInstructions.length,
+          });
+          return { inputOverride: { ...(e.input ?? {}), prompt: newPrompt } };
+        } catch {
+          return undefined;
+        }
+      },
+    );
 
     // ── 9. Context engine — Compaction management ──────────
 

@@ -58,17 +58,28 @@ interface MockCommandEntry {
   handler: (ctx: Record<string, unknown>) => { text: string } | Promise<{ text: string }>;
 }
 
+interface MockToolEntry {
+  name: string;
+  description: string;
+  parameters: { type: string; properties: Record<string, unknown>; required?: string[] };
+  execute: (id: string, params: Record<string, unknown>) =>
+    Promise<{ content: Array<{ type: "text"; text: string }> }>;
+  optional?: boolean;
+}
+
 function createMockApiFull() {
   const hooks: MockHookEntry[] = [];
   const lifecycle: MockLifecycleEntry[] = [];
   const contextEngines: MockContextEngine[] = [];
   const commands: MockCommandEntry[] = [];
+  const tools: MockToolEntry[] = [];
 
   return {
     hooks,
     lifecycle,
     contextEngines,
     commands,
+    tools,
     api: {
       registerHook(
         event: string,
@@ -92,6 +103,12 @@ function createMockApiFull() {
       },
       registerCommand(cmd: MockCommandEntry) {
         commands.push(cmd);
+      },
+      registerTool(
+        tool: Omit<MockToolEntry, "optional">,
+        opts?: { optional?: boolean },
+      ) {
+        tools.push({ ...tool, optional: opts?.optional });
       },
     },
   };
@@ -416,8 +433,21 @@ describe("OpenClawPlugin", () => {
   // ── before_prompt_build ───────────────────────────────
 
   describe("before_prompt_build", () => {
+    /**
+     * Force the plugin's lazy initPromise (which resolves dynamic routing-block
+     * + routing.mjs imports) to settle before asserting on hook output. We
+     * piggyback on before_tool_call which awaits initPromise internally.
+     */
+    async function flushInit(mock: Awaited<ReturnType<typeof createTestPlugin>>) {
+      const before = mock.lifecycle.find((l) => l.event === "before_tool_call");
+      if (before) {
+        try { await before.handler({ toolName: "noop", params: {} }); } catch { /* ignore */ }
+      }
+    }
+
     it("returns appendSystemContext with routing instructions", async () => {
       const mock = await createTestPlugin(join(tempDir, "prompt-build"));
+      await flushInit(mock);
       const promptHook = mock.lifecycle.find(
         (l) => l.event === "before_prompt_build" && l.opts?.priority === 5,
       );
@@ -434,6 +464,156 @@ describe("OpenClawPlugin", () => {
         (l) => l.event === "before_prompt_build" && l.opts?.priority === 5,
       );
       expect(promptHook?.opts?.priority).toBe(5);
+    });
+
+    // SLICE OClaw-2: dynamic routing block via createRoutingBlock(toolNamer).
+    it("appendSystemContext is the dynamic <context_window_protection> XML, not stale AGENTS.md disk content", async () => {
+      const mock = await createTestPlugin(join(tempDir, "prompt-dynamic"));
+      await flushInit(mock);
+      const promptHook = mock.lifecycle.find(
+        (l) => l.event === "before_prompt_build" && l.opts?.priority === 5,
+      );
+      const result = promptHook!.handler() as { appendSystemContext?: string };
+      expect(result?.appendSystemContext).toBeDefined();
+      // Hallmark of createRoutingBlock(toolNamer) — see hooks/routing-block.mjs:19.
+      expect(result.appendSystemContext).toContain("<context_window_protection>");
+      expect(result.appendSystemContext).toContain("<tool_selection_hierarchy>");
+      // OpenClaw tool-namer leaves bare ctx_* names unprefixed (no MCP wrap).
+      expect(result.appendSystemContext).toContain("ctx_batch_execute");
+    });
+  });
+
+  // ── SLICE OClaw-1: registerTool exposes 11 ctx_* MCP tools ────────
+  describe("registerTool (SLICE OClaw-1 — sidecar MCP)", () => {
+    const EXPECTED_NAMES = [
+      "ctx_execute",
+      "ctx_execute_file",
+      "ctx_index",
+      "ctx_search",
+      "ctx_fetch_and_index",
+      "ctx_batch_execute",
+      "ctx_stats",
+      "ctx_doctor",
+      "ctx_upgrade",
+      "ctx_purge",
+      "ctx_insight",
+    ] as const;
+
+    it("registers all 11 ctx_* tools via api.registerTool", async () => {
+      const mock = await createTestPlugin(join(tempDir, "register-tool"));
+      const names = mock.tools.map((t) => t.name);
+      for (const expected of EXPECTED_NAMES) {
+        expect(names).toContain(expected);
+      }
+      expect(mock.tools.length).toBeGreaterThanOrEqual(EXPECTED_NAMES.length);
+    });
+
+    it("each tool definition has description + parameters schema", async () => {
+      const mock = await createTestPlugin(join(tempDir, "register-tool-shape"));
+      for (const tool of mock.tools) {
+        expect(tool.description.length).toBeGreaterThan(0);
+        expect(tool.parameters.type).toBe("object");
+        expect(typeof tool.execute).toBe("function");
+      }
+    });
+
+    it("execute() returns MCP-shaped { content: [{type, text}] } response", async () => {
+      const mock = await createTestPlugin(join(tempDir, "register-tool-exec"));
+      const tool = mock.tools.find((t) => t.name === "ctx_search");
+      expect(tool).toBeDefined();
+      const out = await tool!.execute("call-1", { queries: ["hello"] });
+      expect(out).toHaveProperty("content");
+      expect(Array.isArray(out.content)).toBe(true);
+      expect(out.content[0].type).toBe("text");
+      expect(typeof out.content[0].text).toBe("string");
+    });
+  });
+
+  // ── SLICE OClaw-3: before_model_resolve filters system reminders ────
+  describe("before_model_resolve system-reminder filter (SLICE OClaw-3)", () => {
+    it("does NOT insert events when message starts with <system-reminder>", async () => {
+      const mock = await createTestPlugin(join(tempDir, "filter-system-reminder"));
+      const hook = mock.lifecycle.find((l) => l.event === "before_model_resolve");
+      expect(hook).toBeDefined();
+      // Handler is side-effect-only — assert it returns void/undefined and
+      // does not throw on a system-reminder-prefixed message.
+      const result = await hook!.handler({
+        userMessage: "<system-reminder>do not commit</system-reminder> please refactor",
+      });
+      expect(result).toBeUndefined();
+    });
+
+    it("does NOT insert events for <task-notification>, <context_guidance>, <tool-result>", async () => {
+      const mock = await createTestPlugin(join(tempDir, "filter-other-prefixes"));
+      const hook = mock.lifecycle.find((l) => l.event === "before_model_resolve");
+      const prefixes = ["<task-notification>", "<context_guidance>", "<tool-result>"];
+      for (const p of prefixes) {
+        const result = await hook!.handler({ userMessage: `${p}payload` });
+        expect(result).toBeUndefined();
+      }
+    });
+
+    it("STILL processes genuine user messages (no prefix)", async () => {
+      const mock = await createTestPlugin(join(tempDir, "filter-passthrough"));
+      const hook = mock.lifecycle.find((l) => l.event === "before_model_resolve");
+      // Should not throw — extractUserEvents path runs.
+      await expect(
+        hook!.handler({ userMessage: "don't use that approach, use X instead" }),
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  // ── SLICE OClaw-4: session_end handler ────────────────────────────
+  describe("session_end (SLICE OClaw-4)", () => {
+    it("registers session_end lifecycle hook", async () => {
+      const mock = await createTestPlugin(join(tempDir, "session-end-register"));
+      const events = mock.lifecycle.map((l) => l.event);
+      expect(events).toContain("session_end");
+    });
+
+    it("session_end handler runs without throwing when no events captured", async () => {
+      const mock = await createTestPlugin(join(tempDir, "session-end-empty"));
+      const hook = mock.lifecycle.find((l) => l.event === "session_end");
+      expect(hook).toBeDefined();
+      await expect(Promise.resolve(hook!.handler({}))).resolves.toBeUndefined();
+    });
+  });
+
+  // ── SLICE OClaw-5: subagent_spawning injects routing block ────────
+  describe("subagent_spawning routing-block injection (SLICE OClaw-5)", () => {
+    async function flushInit(mock: Awaited<ReturnType<typeof createTestPlugin>>) {
+      const before = mock.lifecycle.find((l) => l.event === "before_tool_call");
+      if (before) {
+        try { await before.handler({ toolName: "noop", params: {} }); } catch { /* ignore */ }
+      }
+    }
+
+    it("registers subagent_spawning lifecycle hook", async () => {
+      const mock = await createTestPlugin(join(tempDir, "subagent-register"));
+      const events = mock.lifecycle.map((l) => l.event);
+      expect(events).toContain("subagent_spawning");
+    });
+
+    it("returns inputOverride.prompt with routing block appended to the original prompt", async () => {
+      const mock = await createTestPlugin(join(tempDir, "subagent-inject"));
+      await flushInit(mock);
+      const hook = mock.lifecycle.find((l) => l.event === "subagent_spawning");
+      const out = hook!.handler({
+        input: { prompt: "Investigate the failing test." },
+      }) as { inputOverride?: { prompt?: string } } | undefined;
+      expect(out?.inputOverride?.prompt).toBeDefined();
+      expect(out!.inputOverride!.prompt!).toContain("Investigate the failing test.");
+      expect(out!.inputOverride!.prompt!).toContain("<context_window_protection>");
+    });
+
+    it("falls back gracefully when input.prompt is missing", async () => {
+      const mock = await createTestPlugin(join(tempDir, "subagent-no-prompt"));
+      await flushInit(mock);
+      const hook = mock.lifecycle.find((l) => l.event === "subagent_spawning");
+      const out = hook!.handler({ input: {} }) as
+        | { inputOverride?: { prompt?: string } }
+        | undefined;
+      expect(out?.inputOverride?.prompt).toContain("<context_window_protection>");
     });
   });
 

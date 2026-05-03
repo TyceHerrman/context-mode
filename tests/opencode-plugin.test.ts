@@ -54,7 +54,7 @@ describe("ContextModePlugin", () => {
   // ── Factory ───────────────────────────────────────────
 
   describe("factory", () => {
-    it("returns object with 4 hook handlers", async () => {
+    it("returns object with 5 hook handlers", async () => {
       const plugin = await createTestPlugin(join(tempDir, "factory-test"));
 
       expect(plugin).toHaveProperty("tool.execute.before");
@@ -66,11 +66,14 @@ describe("ContextModePlugin", () => {
       // does not accept the {role,content} shape we used to push).
       expect(plugin).toHaveProperty("experimental.chat.system.transform");
       expect(plugin).not.toHaveProperty("experimental.chat.messages.transform");
+      // OC-2 (Z2) — chat.message wired to capture user prompts.
+      expect(plugin).toHaveProperty("chat.message");
 
       expect(typeof plugin["tool.execute.before"]).toBe("function");
       expect(typeof plugin["tool.execute.after"]).toBe("function");
       expect(typeof plugin["experimental.session.compacting"]).toBe("function");
       expect(typeof plugin["experimental.chat.system.transform"]).toBe("function");
+      expect(typeof plugin["chat.message"]).toBe("function");
     });
 
     it("does not write AGENTS.md routing instructions on startup", async () => {
@@ -281,14 +284,19 @@ describe("ContextModePlugin", () => {
       expect(out.system).toEqual(["existing"]);
     });
 
-    it("is a no-op when no resume snapshot exists", async () => {
+    it("injects routing block but no resume snapshot when no prior row exists", async () => {
+      // v1.0.107 — routing-block injection (OC-1) is INDEPENDENT of resume
+      // snapshot. With no prior row, only the routing block lands.
       const plugin = await createTestPlugin(join(tempDir, "sysxform-no-resume"));
-      const out = { system: [] as string[] };
+      const out = { system: ["HEADER"] };
       await plugin["experimental.chat.system.transform"](
         { sessionID: "fresh-session", model: {} } as any,
         out,
       );
-      expect(out.system).toEqual([]);
+      expect(out.system[0]).toBe("HEADER"); // header preserved
+      expect(out.system.length).toBe(2); // header + routing block (no resume)
+      expect(out.system[1]).toContain("<context_window_protection>");
+      expect(out.system.join("\n")).not.toContain("session_resume");
     });
 
     it("prepends a previously-recorded snapshot to output.system on first call", async () => {
@@ -307,13 +315,17 @@ describe("ContextModePlugin", () => {
       );
 
       // New session enters via system.transform — must inherit the snapshot
-      const out = { system: [] as string[] };
+      // PLUS the OC-1 routing block (no header in this fixture, so both go
+      // in via splice(1, 0, ...) — array becomes [routing, snapshot]).
+      const out = { system: ["HEADER"] };
       await plugin["experimental.chat.system.transform"](
         { sessionID: "new-session", model: {} } as any,
         out,
       );
-      expect(out.system.length).toBe(1);
-      expect(out.system[0]).toContain("session_resume");
+      expect(out.system[0]).toBe("HEADER");
+      expect(out.system.length).toBe(3); // HEADER + routing + snapshot
+      expect(out.system.some((s) => s.includes("session_resume"))).toBe(true);
+      expect(out.system.some((s) => s.includes("<context_window_protection>"))).toBe(true);
     });
 
     it("preserves system[0] header so OpenCode's prompt-cache fold survives", async () => {
@@ -325,6 +337,8 @@ describe("ContextModePlugin", () => {
       // cache-fold is skipped → each system block ships as a separate
       // `role: "system"` message → provider prompt cache invalidates on every
       // resume injection (token cost regression). We insert at index 1 instead.
+      // v1.0.107 — both routing block and resume snapshot now live between
+      // HEADER and BODY (4 elements total).
       const projectDir = join(tempDir, "sysxform-cache-fold");
       const plugin = await createTestPlugin(projectDir);
       await plugin["tool.execute.after"](
@@ -346,9 +360,11 @@ describe("ContextModePlugin", () => {
       // The snapshot was inserted, but header at index 0 is preserved
       // exactly as OpenCode saw it before the hook.
       expect(out.system[0]).toBe(HEADER);
-      expect(out.system.length).toBe(3);
-      expect(out.system[1]).toContain("session_resume");
-      expect(out.system[2]).toBe(BODY);
+      expect(out.system[out.system.length - 1]).toBe(BODY);
+      expect(out.system.length).toBe(4); // HEADER + routing + snapshot + BODY
+      const middle = out.system.slice(1, -1).join("\n");
+      expect(middle).toContain("session_resume");
+      expect(middle).toContain("<context_window_protection>");
     });
 
     it("does NOT re-inject on second call with the same sessionID (multi-turn)", async () => {
@@ -365,20 +381,21 @@ describe("ContextModePlugin", () => {
         { context: [] as string[], prompt: undefined },
       );
 
-      const out1 = { system: [] as string[] };
+      const out1 = { system: ["HEADER"] };
       await plugin["experimental.chat.system.transform"](
         { sessionID: "turn-X", model: {} } as any,
         out1,
       );
-      expect(out1.system.length).toBe(1);
+      // First turn: HEADER + routing + snapshot
+      expect(out1.system.length).toBe(3);
 
-      const out2 = { system: [] as string[] };
+      const out2 = { system: ["HEADER"] };
       await plugin["experimental.chat.system.transform"](
         { sessionID: "turn-X", model: {} } as any,
         out2,
       );
-      // Same session — already injected this process — silent.
-      expect(out2.system).toEqual([]);
+      // Same session — already injected this process — silent (header only).
+      expect(out2.system).toEqual(["HEADER"]);
     });
 
     // v1.0.106 — Mickey #376 follow-up: self-injection guard
@@ -398,13 +415,19 @@ describe("ContextModePlugin", () => {
 
       // B's NEXT chat turn fires system.transform — must NOT splice B's
       // own snapshot back into B's prompt (wasteful + would consume the
-      // row meant for the next fresh session).
+      // row meant for the next fresh session). v1.0.107 — routing block
+      // STILL injects (it's session-agnostic, OC-1 contract).
       const out = { system: ["HEADER", "BODY"] };
       await plugin["experimental.chat.system.transform"](
         { sessionID: "B", model: {} } as any,
         out,
       );
-      expect(out.system).toEqual(["HEADER", "BODY"]);
+      // No resume snapshot for B (self-inject guard) but routing block lands.
+      expect(out.system.length).toBe(3);
+      expect(out.system[0]).toBe("HEADER");
+      expect(out.system[2]).toBe("BODY");
+      expect(out.system.join("\n")).not.toContain("session_resume");
+      expect(out.system[1]).toContain("<context_window_protection>");
     });
 
     // v1.0.106 — when no row exists, do NOT mark sessionId as injected,
@@ -414,13 +437,14 @@ describe("ContextModePlugin", () => {
       const projectDir = join(tempDir, "sysxform-retry");
       const plugin = await createTestPlugin(projectDir);
 
-      // First call — no snapshot in DB yet
+      // First call — no snapshot in DB yet. Routing block still fires.
       const out1 = { system: ["HEADER"] };
       await plugin["experimental.chat.system.transform"](
         { sessionID: "C", model: {} } as any,
         out1,
       );
-      expect(out1.system).toEqual(["HEADER"]); // no inject
+      expect(out1.system.length).toBe(2); // HEADER + routing block
+      expect(out1.system.join("\n")).not.toContain("session_resume");
 
       // Now a different session compacts and produces a snapshot
       await plugin["tool.execute.after"](
@@ -432,13 +456,14 @@ describe("ContextModePlugin", () => {
         { context: [] as string[], prompt: undefined },
       );
 
-      // C's next turn — should pick up the donor's snapshot (not stuck silent)
+      // C's next turn — routing already injected this session, but resume
+      // gate not consumed yet (no premature gate). Should pick up donor row.
       const out2 = { system: ["HEADER"] };
       await plugin["experimental.chat.system.transform"](
         { sessionID: "C", model: {} } as any,
         out2,
       );
-      expect(out2.system.length).toBe(2);
+      expect(out2.system.length).toBe(2); // HEADER + snapshot (no re-routing)
       expect(out2.system[1]).toContain("session_resume");
     });
 
@@ -457,22 +482,24 @@ describe("ContextModePlugin", () => {
         { context: [] as string[], prompt: undefined },
       );
 
-      // B asks for inject — gets nothing (own row excluded)
+      // B asks for inject — gets routing block but no snapshot (own row excluded)
       const outB = { system: ["HEADER"] };
       await plugin["experimental.chat.system.transform"](
         { sessionID: "B", model: {} } as any,
         outB,
       );
-      expect(outB.system).toEqual(["HEADER"]);
+      expect(outB.system.length).toBe(2);
+      expect(outB.system.join("\n")).not.toContain("session_resume");
+      expect(outB.system[1]).toContain("<context_window_protection>");
 
-      // C asks — gets B's snapshot
+      // C asks — gets B's snapshot AND routing block (both first-fire for C)
       const outC = { system: ["HEADER"] };
       await plugin["experimental.chat.system.transform"](
         { sessionID: "C", model: {} } as any,
         outC,
       );
-      expect(outC.system.length).toBe(2);
-      expect(outC.system[1]).toContain("session_resume");
+      expect(outC.system.length).toBe(3); // HEADER + routing + snapshot
+      expect(outC.system.some((s) => s.includes("session_resume"))).toBe(true);
     });
 
     // v1.0.106 — visible signal so users can confirm the feature actually
@@ -496,8 +523,11 @@ describe("ContextModePlugin", () => {
         { sessionID: "consumer", model: {} } as any,
         out,
       );
-      expect(out.system.length).toBe(2);
-      expect(out.system[1]).toMatch(/^<!-- context-mode v[\d.]+: resumed prior session [\w-]{1,8}/);
+      // v1.0.107 — out.system is [HEADER, routing-block, snapshot-with-marker]
+      expect(out.system.length).toBe(3);
+      const snapshotEntry = out.system.find((s) => s.includes("session_resume"));
+      expect(snapshotEntry).toBeDefined();
+      expect(snapshotEntry!).toMatch(/^<!-- context-mode v[\d.]+: resumed prior session [\w-]{1,8}/);
     });
   });
 
@@ -530,6 +560,195 @@ describe("ContextModePlugin", () => {
       expect(snapshot).toContain("main.ts");
     });
 
+    // ── OC-1: ROUTING_BLOCK injection in chat.system.transform ────
+    // Mickey ana şikayet (CCv1). v1.0.107 — adapter must inject the
+    // <context_window_protection> XML routing block on the first
+    // chat.system.transform call per session, INDEPENDENT of any
+    // resume snapshot row (which may or may not exist yet).
+    it("OC-1: injects <context_window_protection> routing block on first turn per session", async () => {
+      const plugin = await createTestPlugin(join(tempDir, "oc1-routing"));
+      const out = { system: ["HEADER", "BODY"] };
+      await plugin["experimental.chat.system.transform"](
+        { sessionID: "oc1-fresh", model: {} } as any,
+        out,
+      );
+      // header preserved at index 0 (cache-fold invariant)
+      expect(out.system[0]).toBe("HEADER");
+      // routing block spliced at index 1
+      const joined = out.system.join("\n");
+      expect(joined).toContain("<context_window_protection>");
+      expect(joined).toContain("<priority_instructions>");
+      // platform-specific tool name proves createToolNamer wired correctly
+      expect(joined).toContain("context-mode_ctx_search");
+    });
+
+    it("OC-1: does NOT re-inject routing block on second turn per session", async () => {
+      const plugin = await createTestPlugin(join(tempDir, "oc1-once"));
+      const out1 = { system: ["HEADER"] };
+      await plugin["experimental.chat.system.transform"](
+        { sessionID: "oc1-twice", model: {} } as any,
+        out1,
+      );
+      expect(out1.system.join("\n")).toContain("<context_window_protection>");
+
+      const out2 = { system: ["HEADER"] };
+      await plugin["experimental.chat.system.transform"](
+        { sessionID: "oc1-twice", model: {} } as any,
+        out2,
+      );
+      // Second turn — routing block already injected this process; silent.
+      expect(out2.system).toEqual(["HEADER"]);
+    });
+  });
+
+  // ── OC-2: chat.message hook (Z2) ──────────────────────────
+  // Wires `chat.message` to capture user prompts. CCv2 inline filter
+  // skips synthetic system messages (<task-notification>, <system-reminder>,
+  // <context_guidance>, <tool-result>) so we don't flood the DB with noise.
+
+  describe("chat.message", () => {
+    it("OC-2: captures user prompt as user_prompt event", async () => {
+      const projectDir = join(tempDir, "oc2-capture");
+      mkdirSync(projectDir, { recursive: true });
+      const plugin = await createTestPlugin(projectDir);
+
+      const msg = "switch to mission mode and prefer the elegant solution";
+      await plugin["chat.message"](
+        { sessionID: "oc2-sess", agent: "build", messageID: "m1" } as any,
+        { message: { role: "user" } as any, parts: [{ type: "text", text: msg }] } as any,
+      );
+
+      // Verify SessionDB has the event
+      const { SessionDB } = await import("../src/session/db.js");
+      const { OpenCodeAdapter } = await import("../src/adapters/opencode/index.js");
+      const adapter = new OpenCodeAdapter("opencode");
+      const db = new SessionDB({ dbPath: adapter.getSessionDBPath(projectDir) });
+      const events = db.getEvents("oc2-sess") as any[];
+      db.close();
+      const userPromptEvent = events.find((e: any) => e.type === "user_prompt");
+      expect(userPromptEvent).toBeDefined();
+      expect(userPromptEvent.data).toContain("mission mode");
+    });
+
+    it("OC-2: filters synthetic system tags (CCv2 inline filter)", async () => {
+      const projectDir = join(tempDir, "oc2-filter");
+      mkdirSync(projectDir, { recursive: true });
+      const plugin = await createTestPlugin(projectDir);
+
+      const synthetic = "<system-reminder>internal nudge</system-reminder>";
+      await plugin["chat.message"](
+        { sessionID: "oc2-skip", agent: "build", messageID: "m1" } as any,
+        { message: { role: "user" } as any, parts: [{ type: "text", text: synthetic }] } as any,
+      );
+
+      const { SessionDB } = await import("../src/session/db.js");
+      const { OpenCodeAdapter } = await import("../src/adapters/opencode/index.js");
+      const adapter = new OpenCodeAdapter("opencode");
+      const db = new SessionDB({ dbPath: adapter.getSessionDBPath(projectDir) });
+      const events = db.getEvents("oc2-skip") as any[];
+      db.close();
+      const userPromptEvent = events.find((e: any) => e.type === "user_prompt");
+      expect(userPromptEvent).toBeUndefined();
+    });
+
+    it("OC-2: handles missing/empty parts gracefully", async () => {
+      const plugin = await createTestPlugin(join(tempDir, "oc2-empty"));
+      await expect(
+        plugin["chat.message"](
+          { sessionID: "oc2-empty-sess" } as any,
+          { message: {} as any, parts: [] } as any,
+        ),
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  // ── OC-3: buildAutoInjection in compacting (Z3) ───────────
+  // Replace raw buildResumeSnapshot push with budget-aware
+  // buildAutoInjection (~500 tokens / ~2000 chars hard cap).
+
+  describe("session.compacting buildAutoInjection (OC-3)", () => {
+    it("OC-3: prepends budget-capped auto-injection block (≤2000 chars) to output.context", async () => {
+      const plugin = await createTestPlugin(join(tempDir, "oc3-budget"));
+
+      // Seed enough events to make a fat snapshot
+      for (let i = 0; i < 12; i++) {
+        await plugin["tool.execute.after"](
+          { tool: "Read", sessionID: "oc3-sess", callID: `c${i}`, args: { file_path: `/src/file${i}.ts` } },
+          { title: "Read", output: `content ${i}`.repeat(50), metadata: {} },
+        );
+      }
+      // Inject a behavioral_directive via chat.message so auto-injection has P1 role
+      await plugin["chat.message"](
+        { sessionID: "oc3-sess", agent: "build", messageID: "mr" } as any,
+        { message: {} as any, parts: [{ type: "text", text: "act as a senior staff engineer reviewing diffs" }] } as any,
+      );
+
+      const output = { context: [] as string[], prompt: undefined };
+      await plugin["experimental.session.compacting"](
+        { sessionID: "oc3-sess" } as any,
+        output,
+      );
+      // The compacting handler still pushes the raw resume snapshot (existing
+      // contract). It MUST also push a separate auto-injection block whose
+      // length ≤ 2000 chars (~500 token budget per auto-injection.mjs).
+      const autoBlock = output.context.find((c) => c.includes("<session_state source=\"compaction\">"));
+      expect(autoBlock).toBeDefined();
+      expect(autoBlock!.length).toBeLessThanOrEqual(2000);
+    });
+  });
+
+  // ── OC-4: AGENTS.md / CLAUDE.md rule capture (Z4) ─────────
+  // Capture the project AGENTS.md (OpenCode's CLAUDE.md equivalent) on
+  // first hook fire per projectDir, as rule + rule_content events.
+
+  describe("AGENTS.md rule capture (OC-4)", () => {
+    it("OC-4: captures AGENTS.md as rule + rule_content events on first tool.execute.after", async () => {
+      const projectDir = join(tempDir, "oc4-agents-md");
+      mkdirSync(projectDir, { recursive: true });
+      writeFileSync(join(projectDir, "AGENTS.md"), "# project rules\n- never push without approval");
+
+      const plugin = await createTestPlugin(projectDir);
+      await plugin["tool.execute.after"](
+        { tool: "Read", sessionID: "oc4-sess", callID: "c1", args: { file_path: "/x.ts" } },
+        { title: "Read", output: "x", metadata: {} },
+      );
+
+      const { SessionDB } = await import("../src/session/db.js");
+      const { OpenCodeAdapter } = await import("../src/adapters/opencode/index.js");
+      const adapter = new OpenCodeAdapter("opencode");
+      const db = new SessionDB({ dbPath: adapter.getSessionDBPath(projectDir) });
+      const events = db.getEvents("oc4-sess") as any[];
+      db.close();
+      const rule = events.find((e: any) => e.type === "rule");
+      const ruleContent = events.find((e: any) => e.type === "rule_content");
+      expect(rule).toBeDefined();
+      expect(rule.data).toContain("AGENTS.md");
+      expect(ruleContent).toBeDefined();
+      expect(ruleContent.data).toContain("never push without approval");
+    });
+
+    it("OC-4: skips capture when AGENTS.md missing", async () => {
+      const projectDir = join(tempDir, "oc4-no-agents");
+      mkdirSync(projectDir, { recursive: true });
+      const plugin = await createTestPlugin(projectDir);
+      await plugin["tool.execute.after"](
+        { tool: "Read", sessionID: "oc4-empty-sess", callID: "c1", args: { file_path: "/y.ts" } },
+        { title: "Read", output: "y", metadata: {} },
+      );
+
+      const { SessionDB } = await import("../src/session/db.js");
+      const { OpenCodeAdapter } = await import("../src/adapters/opencode/index.js");
+      const adapter = new OpenCodeAdapter("opencode");
+      const db = new SessionDB({ dbPath: adapter.getSessionDBPath(projectDir) });
+      const events = db.getEvents("oc4-empty-sess") as any[];
+      db.close();
+      expect(events.find((e: any) => e.type === "rule")).toBeUndefined();
+    });
+  });
+
+  // ── Integration: blocked tool flow ────────────────────
+
+  describe("end-to-end flow (blocked)", () => {
     it("blocked tool command is replaced before execution", async () => {
       const plugin = await createTestPlugin(join(tempDir, "e2e-block"));
       const beforeInput = { tool: "Bash", sessionID: "test-session", callID: "call-1" };

@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { VSCodeCopilotAdapter } from "../../src/adapters/vscode-copilot/index.js";
+import { HOOK_TYPES, HOOK_SCRIPTS } from "../../src/adapters/vscode-copilot/hooks.js";
 
 describe("VSCodeCopilotAdapter", () => {
   let adapter: VSCodeCopilotAdapter;
@@ -175,6 +176,25 @@ describe("VSCodeCopilotAdapter", () => {
       const sessionDir = adapter.getSessionDir();
       expect(sessionDir).toContain("context-mode");
       expect(sessionDir).toContain("sessions");
+    });
+  });
+
+  // ── HOOK_TYPES / HOOK_SCRIPTS parity ──────────────────
+
+  describe("HOOK_TYPES / HOOK_SCRIPTS parity", () => {
+    it("every HOOK_TYPES entry has a matching HOOK_SCRIPTS file (no orphans)", () => {
+      const types = Object.values(HOOK_TYPES);
+      const scriptKeys = Object.keys(HOOK_SCRIPTS);
+      const missing = types.filter((t) => !scriptKeys.includes(t));
+      expect(missing).toEqual([]);
+      expect(types.length).toBe(scriptKeys.length);
+    });
+
+    it("does NOT declare Stop / SubagentStart / SubagentStop (orphan removal)", () => {
+      const types = Object.values(HOOK_TYPES);
+      expect(types).not.toContain("Stop");
+      expect(types).not.toContain("SubagentStart");
+      expect(types).not.toContain("SubagentStop");
     });
   });
 

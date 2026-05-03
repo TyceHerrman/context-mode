@@ -12,7 +12,6 @@ import { buildNodeCommand } from "../types.js";
  * VS Code Copilot hook system reference:
  *   - Hooks are registered in .github/hooks/*.json
  *   - Hook names: PreToolUse, PostToolUse, PreCompact, SessionStart (PascalCase)
- *   - Additional hooks: Stop, SubagentStart, SubagentStop (unique to VS Code)
  *   - CRITICAL: matchers are parsed but IGNORED (all hooks fire on all tools)
  *   - Input: JSON on stdin
  *   - Output: JSON on stdout (or empty for passthrough)
@@ -29,10 +28,6 @@ export const HOOK_TYPES = {
   POST_TOOL_USE: "PostToolUse",
   PRE_COMPACT: "PreCompact",
   SESSION_START: "SessionStart",
-  // Additional hooks unique to VS Code Copilot
-  STOP: "Stop",
-  SUBAGENT_START: "SubagentStart",
-  SUBAGENT_STOP: "SubagentStop",
 } as const;
 
 export type HookType = (typeof HOOK_TYPES)[keyof typeof HOOK_TYPES];
@@ -95,7 +90,12 @@ export function buildHookCommand(hookType: HookType, pluginRoot?: string): strin
     throw new Error(`No script defined for hook type: ${hookType}`);
   }
   if (pluginRoot) {
-    return buildNodeCommand(`${pluginRoot}/hooks/${scriptName}`);
+    // v1.0.107 fix — was `${pluginRoot}/hooks/${scriptName}` which resolved to
+    // the Claude-Code generic hook (`hooks/pretooluse.mjs`) instead of the
+    // VSCode-specific wrapper at `hooks/vscode-copilot/pretooluse.mjs`. JetBrains
+    // adapter already had the correct subdir (jetbrains-copilot/hooks.ts:98)
+    // so this brings VSCode to parity.
+    return buildNodeCommand(`${pluginRoot}/hooks/vscode-copilot/${scriptName}`);
   }
   return `context-mode hook vscode-copilot ${hookType.toLowerCase()}`;
 }

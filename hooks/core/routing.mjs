@@ -133,13 +133,25 @@ export async function initSecurity(buildDir) {
  * - VS Code Copilot: run_in_terminal (command field), read_file, run_vs_code_task
  */
 const TOOL_ALIASES = {
-  // Gemini CLI
+  // Gemini CLI / Qwen Code (share native tool names — Qwen is Gemini fork:
+  // refs/platforms/qwen-code/packages/core/src/tools/tool-names.ts)
   "run_shell_command": "Bash",
   "read_file": "Read",
   "read_many_files": "Read",
   "grep_search": "Grep",
   "search_file_content": "Grep",
   "web_fetch": "WebFetch",
+  // Qwen Code additional tool names (no routing branch yet but normalized
+  // so future routing logic works without per-platform fallback):
+  "write_file": "Write",
+  "edit": "Edit",
+  "glob": "Glob",
+  "todo_write": "TodoWrite",
+  "ask_user_question": "AskUserQuestion",
+  "list_directory": "LS",
+  "save_memory": "Memory",
+  "skill": "Skill",
+  "exit_plan_mode": "ExitPlanMode",
   // OpenCode
   "bash": "Bash",
   "view": "Read",

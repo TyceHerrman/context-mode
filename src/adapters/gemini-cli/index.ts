@@ -231,6 +231,17 @@ export class GeminiCLIAdapter extends BaseAdapter implements HookAdapter {
 
   generateHookConfig(pluginRoot: string): HookRegistration {
     return {
+      [GEMINI_HOOK_NAMES.BEFORE_AGENT]: [
+        {
+          matcher: "",
+          hooks: [
+            {
+              type: "command",
+              command: buildGeminiHookCommand(GEMINI_HOOK_NAMES.BEFORE_AGENT, pluginRoot),
+            },
+          ],
+        },
+      ],
       [GEMINI_HOOK_NAMES.BEFORE_TOOL]: [
         {
           matcher: "run_shell_command|read_file|read_many_files|grep_search|search_file_content|web_fetch|activate_skill|mcp__plugin_context-mode",
@@ -436,6 +447,7 @@ export class GeminiCLIAdapter extends BaseAdapter implements HookAdapter {
     const hookConfigs: Array<{
       name: string;
     }> = [
+      { name: GEMINI_HOOK_NAMES.BEFORE_AGENT },
       { name: GEMINI_HOOK_NAMES.BEFORE_TOOL },
       { name: GEMINI_HOOK_NAMES.SESSION_START },
     ];
