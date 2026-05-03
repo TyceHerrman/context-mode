@@ -21,6 +21,7 @@
 
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { existsSync, readFileSync } from "node:fs";
 
 import { SessionDB } from "./session/db.js";
 import { extractEvents } from "./session/extract.js";
@@ -29,6 +30,20 @@ import { buildResumeSnapshot } from "./session/snapshot.js";
 import type { SessionEvent } from "./types.js";
 import { AdapterPlatformType, OpenCodeAdapter } from "./adapters/opencode/index.js";
 import { PLATFORM_ENV_VARS } from "./adapters/detect.js";
+
+// Read package.json version once at module load (not on every hook call).
+// Used in the resume-injection visible signal so users can confirm in
+// OPENCODE_DEBUG logs which plugin version actually injected.
+const VERSION: string = (() => {
+  try {
+    const pkgRoot = dirname(fileURLToPath(import.meta.url));
+    for (const rel of ["../package.json", "./package.json"]) {
+      const p = resolve(pkgRoot, rel);
+      if (existsSync(p)) return JSON.parse(readFileSync(p, "utf8")).version ?? "unknown";
+    }
+  } catch { /* fall through */ }
+  return "unknown";
+})();
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -257,11 +272,22 @@ async function createContextModePlugin(ctx: PluginContext) {
       const sessionId = input?.sessionID;
       if (!sessionId) return;
       if (resumeInjected.has(sessionId)) return;
-      resumeInjected.add(sessionId);
       try {
-        const row = db.claimLatestUnconsumedResume();
-        if (!row || !row.snapshot) return;
+        // Pass current sessionId so SQL excludes self-injection (v1.0.106 — Mickey #376
+        // follow-up): if Session B compacts mid-flight and produces its own row,
+        // B's next system.transform must NOT claim that row back into B's prompt.
+        const row = db.claimLatestUnconsumedResume(sessionId);
+        if (!row || !row.snapshot) return;        // no row → leave `resumeInjected` unset → retry on next turn
         if (Array.isArray(output?.system)) {
+          // Visible signal — without this, the injection is silent and users
+          // cannot tell the feature is active (Mickey: "I can't find use case
+          // for it"). The XML comment is harmless to the model and shows up in
+          // OPENCODE_DEBUG logs as proof the snapshot landed.
+          const eventCount = row.snapshot.match(/events="(\d+)"/)?.[1] ?? "?";
+          const marker =
+            `<!-- context-mode v${VERSION}: resumed prior session ${row.sessionId.slice(0, 8)} ` +
+            `(${eventCount} events, ${row.snapshot.length} chars) -->\n`;
+
           // Insert at index 1 (after the header) — NOT unshift.
           // OpenCode's llm.ts:117-128 saves `header = system[0]` BEFORE this
           // hook runs and then folds the rest into a 2-part structure
@@ -272,7 +298,9 @@ async function createContextModePlugin(ctx: PluginContext) {
           // provider prompt cache is invalidated on every resume injection.
           // Inserting at index 1 keeps the header invariant and lets the
           // snapshot ride along inside the cached body block.
-          output.system.splice(1, 0, row.snapshot);
+          output.system.splice(1, 0, marker + row.snapshot);
+          // Mark consumed only AFTER successful splice so failed paths can retry
+          resumeInjected.add(sessionId);
         }
       } catch {
         // Silent — never break the chat turn

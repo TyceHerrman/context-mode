@@ -155,6 +155,7 @@ OpenCode uses a TypeScript plugin paradigm instead of JSON stdin/stdout. Hooks a
 - `tool.execute.before` -- equivalent to PreToolUse
 - `tool.execute.after` -- equivalent to PostToolUse
 - `experimental.session.compacting` -- equivalent to PreCompact (experimental)
+- `experimental.chat.system.transform` -- SessionStart-equivalent (cross-session resume injection)
 
 **Blocking:** `throw Error` in `tool.execute.before` handler
 
@@ -170,11 +171,15 @@ OpenCode uses a TypeScript plugin paradigm instead of JSON stdin/stdout. Hooks a
 - `opencode.json` or `.opencode/opencode.json`
 - Plugin registered in the `plugin` array with npm package names
 
+**Cross-session resume:**
+When OpenCode triggers `experimental.session.compacting` (auto on context overflow OR manual `/compact`), context-mode saves a snapshot to its per-project SQLite store. The NEXT new session in the same project — typically after `Ctrl+D` then re-running `opencode`, or starting a fresh chat — claims that snapshot via `experimental.chat.system.transform` and prepends it to `system[1]` (preserves OpenCode's `[header, body]` cache fold). The current session never claims its OWN snapshot back (self-injection guard, v1.0.106). To verify the injection landed, run with `OPENCODE_DEBUG=1` and grep for `<!-- context-mode v` in the system prompt — that's the visible marker.
+
 **Known Issues / Caveats:**
-- SessionStart is broken (issue #14808, no hook issue #5409)
+- SessionStart is broken (issue #14808, no hook issue #5409) — we use `experimental.chat.system.transform` as a surrogate
 - Output modification has TUI rendering bug for bash tool (issue #13575)
 - `experimental.session.compacting` is marked experimental and may change
 - No `canInjectSessionContext` capability
+- Resume snapshots are scoped per-project (DB sharded by SHA-256 of `ctx.directory`); no cross-project bleed
 
 ---
 

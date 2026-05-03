@@ -371,12 +371,18 @@ export class SessionDB extends SQLiteBase {
     // statement". Required for race-safe cross-session resume injection
     // (Mickey / PR #376) — two parallel chat-turn hooks must not both read
     // the same row before either one writes consumed=1.
+    //
+    // The `session_id != ?` clause prevents self-injection (v1.0.106): when
+    // Session B compacts mid-flight and produces its own row, B's next chat
+    // turn must NOT claim that row back into its own prompt — that's wasted
+    // tokens and steals the snapshot meant for the next fresh session.
     p(S.claimLatestUnconsumedResume,
       `UPDATE session_resume
        SET consumed = 1
        WHERE id = (
          SELECT id FROM session_resume
          WHERE consumed = 0
+           AND session_id != ?
          ORDER BY created_at DESC, id DESC
          LIMIT 1
        )
@@ -715,17 +721,28 @@ export class SessionDB extends SQLiteBase {
   }
 
   /**
-   * Atomically claim the most recent unconsumed resume snapshot in this DB.
+   * Atomically claim the most recent unconsumed resume snapshot in this DB,
+   * EXCLUDING any row that belongs to `currentSessionId`.
    *
    * `SessionDB` is sharded per project (see `getSessionDBPath` — SHA-256 of
    * project dir), so "this DB" already implies "this project". The atomic
    * `UPDATE … RETURNING` ensures concurrent processes for the same project
    * cannot both inject the same snapshot (Mickey / PR #376 race).
    *
-   * Returns null when no unconsumed snapshot exists.
+   * The `currentSessionId` parameter prevents self-injection: when a session
+   * compacts mid-flight and produces its own row, that session's next chat
+   * turn must NOT claim that row back (wasted tokens AND it would consume
+   * the snapshot meant for the next fresh session).
+   *
+   * Pass an empty string to allow self-claim (legacy behaviour, only useful
+   * in tests or one-off harnesses).
+   *
+   * Returns null when no unconsumed snapshot exists for any other session.
    */
-  claimLatestUnconsumedResume(): { sessionId: string; snapshot: string } | null {
-    const row = this.stmt(S.claimLatestUnconsumedResume).get() as
+  claimLatestUnconsumedResume(
+    currentSessionId: string,
+  ): { sessionId: string; snapshot: string } | null {
+    const row = this.stmt(S.claimLatestUnconsumedResume).get(currentSessionId) as
       | { session_id: string; snapshot: string }
       | undefined;
     if (!row) return null;

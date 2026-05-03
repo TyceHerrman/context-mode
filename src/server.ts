@@ -3080,8 +3080,15 @@ async function main() {
     }
   } catch { /* best effort — _detectedAdapter stays null, falls back to .claude */ }
 
-  // Non-blocking version check — result stored for trackResponse warnings
+  // Non-blocking version check — result stored for trackResponse warnings.
+  // First fetch at startup, then refresh every hour so long-running sessions
+  // (some users keep the MCP server alive 24h+) catch new releases without a
+  // restart. `.unref()` lets the process exit normally on SIGTERM regardless
+  // of pending intervals.
   fetchLatestVersion().then(v => { if (v !== "unknown") _latestVersion = v; });
+  setInterval(() => {
+    fetchLatestVersion().then(v => { if (v !== "unknown") _latestVersion = v; });
+  }, 60 * 60 * 1000).unref();
 
   console.error(`Context Mode MCP server v${VERSION} running on stdio`);
   console.error(`Detected runtimes:\n${getRuntimeSummary(runtimes)}`);

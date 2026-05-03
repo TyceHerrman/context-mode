@@ -380,6 +380,125 @@ describe("ContextModePlugin", () => {
       // Same session — already injected this process — silent.
       expect(out2.system).toEqual([]);
     });
+
+    // v1.0.106 — Mickey #376 follow-up: self-injection guard
+    it("does NOT inject snapshot back into the session that produced it (self-injection guard)", async () => {
+      const projectDir = join(tempDir, "sysxform-self-inject");
+      const plugin = await createTestPlugin(projectDir);
+
+      // Session B does work and compacts — produces ITS OWN snapshot row.
+      await plugin["tool.execute.after"](
+        { tool: "Read", sessionID: "B", callID: "c1", args: { file_path: "/p.ts" } },
+        { title: "Read", output: "p", metadata: {} },
+      );
+      await plugin["experimental.session.compacting"](
+        { sessionID: "B" } as any,
+        { context: [] as string[], prompt: undefined },
+      );
+
+      // B's NEXT chat turn fires system.transform — must NOT splice B's
+      // own snapshot back into B's prompt (wasteful + would consume the
+      // row meant for the next fresh session).
+      const out = { system: ["HEADER", "BODY"] };
+      await plugin["experimental.chat.system.transform"](
+        { sessionID: "B", model: {} } as any,
+        out,
+      );
+      expect(out.system).toEqual(["HEADER", "BODY"]);
+    });
+
+    // v1.0.106 — when no row exists, do NOT mark sessionId as injected,
+    // so a later call within the same session can still pick up a snapshot
+    // that arrived after the first attempt.
+    it("retries on next turn when no row exists (no premature gate)", async () => {
+      const projectDir = join(tempDir, "sysxform-retry");
+      const plugin = await createTestPlugin(projectDir);
+
+      // First call — no snapshot in DB yet
+      const out1 = { system: ["HEADER"] };
+      await plugin["experimental.chat.system.transform"](
+        { sessionID: "C", model: {} } as any,
+        out1,
+      );
+      expect(out1.system).toEqual(["HEADER"]); // no inject
+
+      // Now a different session compacts and produces a snapshot
+      await plugin["tool.execute.after"](
+        { tool: "Read", sessionID: "donor", callID: "c1", args: { file_path: "/q.ts" } },
+        { title: "Read", output: "q", metadata: {} },
+      );
+      await plugin["experimental.session.compacting"](
+        { sessionID: "donor" } as any,
+        { context: [] as string[], prompt: undefined },
+      );
+
+      // C's next turn — should pick up the donor's snapshot (not stuck silent)
+      const out2 = { system: ["HEADER"] };
+      await plugin["experimental.chat.system.transform"](
+        { sessionID: "C", model: {} } as any,
+        out2,
+      );
+      expect(out2.system.length).toBe(2);
+      expect(out2.system[1]).toContain("session_resume");
+    });
+
+    // v1.0.106 — prefer next session over self-injection
+    it("snapshot from B is consumed by C, not by B itself", async () => {
+      const projectDir = join(tempDir, "sysxform-b-to-c");
+      const plugin = await createTestPlugin(projectDir);
+
+      // Session B compacts → produces row
+      await plugin["tool.execute.after"](
+        { tool: "Read", sessionID: "B", callID: "c1", args: { file_path: "/r.ts" } },
+        { title: "Read", output: "r", metadata: {} },
+      );
+      await plugin["experimental.session.compacting"](
+        { sessionID: "B" } as any,
+        { context: [] as string[], prompt: undefined },
+      );
+
+      // B asks for inject — gets nothing (own row excluded)
+      const outB = { system: ["HEADER"] };
+      await plugin["experimental.chat.system.transform"](
+        { sessionID: "B", model: {} } as any,
+        outB,
+      );
+      expect(outB.system).toEqual(["HEADER"]);
+
+      // C asks — gets B's snapshot
+      const outC = { system: ["HEADER"] };
+      await plugin["experimental.chat.system.transform"](
+        { sessionID: "C", model: {} } as any,
+        outC,
+      );
+      expect(outC.system.length).toBe(2);
+      expect(outC.system[1]).toContain("session_resume");
+    });
+
+    // v1.0.106 — visible signal so users can confirm the feature actually
+    // fired (without it Mickey reported "I can't find use case for it" —
+    // the inject was silent and invisible in OPENCODE_DEBUG logs).
+    it("emits a visible context-mode marker comment alongside the snapshot", async () => {
+      const projectDir = join(tempDir, "sysxform-marker");
+      const plugin = await createTestPlugin(projectDir);
+
+      await plugin["tool.execute.after"](
+        { tool: "Read", sessionID: "donor", callID: "c1", args: { file_path: "/m.ts" } },
+        { title: "Read", output: "m", metadata: {} },
+      );
+      await plugin["experimental.session.compacting"](
+        { sessionID: "donor" } as any,
+        { context: [] as string[], prompt: undefined },
+      );
+
+      const out = { system: ["HEADER"] };
+      await plugin["experimental.chat.system.transform"](
+        { sessionID: "consumer", model: {} } as any,
+        out,
+      );
+      expect(out.system.length).toBe(2);
+      expect(out.system[1]).toMatch(/^<!-- context-mode v[\d.]+: resumed prior session [\w-]{1,8}/);
+    });
   });
 
   // ── Integration: before + after + compact ─────────────
