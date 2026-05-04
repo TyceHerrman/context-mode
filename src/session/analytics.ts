@@ -668,20 +668,37 @@ function dataBar(bytes: number, maxBytes: number, width: number = 40): string {
  */
 function renderProjectMemory(
   pm: FullReport["projectMemory"],
-  opts?: { lifetime?: LifetimeStats; topN?: number },
+  opts?: { lifetime?: LifetimeStats; topN?: number; sessionTokensSaved?: number },
 ): string[] {
-  if (pm.total_events === 0 && (opts?.lifetime?.totalEvents ?? 0) === 0) return [];
+  const sessionTokensSaved = opts?.sessionTokensSaved ?? 0;
+  // Render when EITHER disk has data OR current session has earnings.
+  if (
+    pm.total_events === 0 &&
+    (opts?.lifetime?.totalEvents ?? 0) === 0 &&
+    sessionTokensSaved === 0
+  ) {
+    return [];
+  }
   const topN = opts?.topN ?? 2;
   const out: string[] = [];
   out.push("");
   out.push("Persistent memory  ✓ preserved across compact, restart & upgrade");
 
-  // Lifetime line (Bug #3) — collapses to project-only when lifetime missing.
+  // Lifetime line — disk-aggregated lifetime PLUS current session's in-memory
+  // savings. Two separate accounting pipelines (server bytes vs hook events)
+  // get unified at the render edge so the user always sees a monotonic total
+  // (lifetime ≥ session). Without this, fresh users / pre-b8e11bf sidecars /
+  // not-yet-flushed events show $0 lifetime even when the session earned $X.
   const lifeEvents = opts?.lifetime?.totalEvents ?? pm.total_events;
   const lifeSessions = opts?.lifetime?.totalSessions ?? pm.session_count;
-  const sessionLabel = lifeSessions === 1 ? "1 session" : `${fmtNum(lifeSessions)} sessions`;
-  // Estimate lifetime savings: ~1KB per event → ~256 tokens/event at Opus rates.
-  const lifetimeTokens = lifeEvents * 256;
+  // Current session counts as 1 when no prior session has been recorded yet.
+  const effectiveSessions =
+    lifeSessions === 0 && sessionTokensSaved > 0 ? 1 : lifeSessions;
+  const sessionLabel =
+    effectiveSessions === 1 ? "1 session" : `${fmtNum(effectiveSessions)} sessions`;
+  // Estimate lifetime savings: ~1KB per event → ~256 tokens/event at Opus rates,
+  // plus current session's already-tracked token savings (in-memory).
+  const lifetimeTokens = lifeEvents * 256 + sessionTokensSaved;
   out.push(`  ${fmtNum(lifeEvents)} events · ${sessionLabel} · ~${tokensToUsd(lifetimeTokens)} saved lifetime`);
   out.push("");
 
@@ -725,8 +742,11 @@ function renderAutoMemory(lifetime: LifetimeStats | undefined): string[] {
 function renderBottomLine(sessionTokensSaved: number, lifetime: LifetimeStats | undefined): string[] {
   const out: string[] = [];
   const sessionUsd = tokensToUsd(sessionTokensSaved);
-  // Lifetime estimate: ~1KB/event ÷ 4 bytes/token = 256 tokens/event.
-  const lifetimeTokens = (lifetime?.totalEvents ?? 0) * 256;
+  // Lifetime = disk-aggregated events × 256 tokens + current session's
+  // in-memory token savings. Two pipelines unified at the render edge so
+  // lifetime ≥ session always (never the surprising "$X session · $0 lifetime"
+  // a fresh user sees pre-flush).
+  const lifetimeTokens = (lifetime?.totalEvents ?? 0) * 256 + sessionTokensSaved;
   const lifetimeUsd = tokensToUsd(lifetimeTokens);
   out.push("");
   out.push("─".repeat(65));
@@ -781,7 +801,7 @@ export function formatReport(
     }
 
     // Project memory + auto-memory + bottom line
-    lines.push(...renderProjectMemory(report.projectMemory, { lifetime }));
+    lines.push(...renderProjectMemory(report.projectMemory, { lifetime, sessionTokensSaved: 0 }));
     lines.push(...renderAutoMemory(lifetime));
     lines.push(...renderBottomLine(0, lifetime));
 
@@ -847,18 +867,30 @@ export function formatReport(
     }
   }
 
-  // ── MCP concurrency usage (only when batch tools recorded a concurrency) ──
+  // ── Parallel I/O — value-forward framing for concurrent batch tools.
+  // Suppressed when no tool ran with max_concurrency > 1 (don't claim
+  // parallelism we didn't deliver). Internal mcp__*__ namespace stripped
+  // for user-facing readability.
   if (mcpUsage && mcpUsage.length > 0) {
-    const concurrent = mcpUsage.filter((u) => u.median_concurrency != null);
-    for (const u of concurrent) {
+    const concurrent = mcpUsage.filter(
+      (u) => u.median_concurrency != null && (u.max_concurrency ?? 1) > 1,
+    );
+    if (concurrent.length > 0) {
+      lines.push("");
       lines.push(
-        `MCP concurrency usage: ${u.tool_name} median=${u.median_concurrency} max=${u.max_concurrency} (${u.calls} calls)`,
+        "Parallel I/O  ✓ one call did the work of many — faster runs, lower bill, same answer.",
       );
+      for (const u of concurrent) {
+        const name = u.tool_name.replace(/^mcp__.*?__/, "");
+        lines.push(
+          `  ${name.padEnd(22)} ${u.calls} batches · ${u.median_concurrency} typical, ${u.max_concurrency} peak`,
+        );
+      }
     }
   }
 
   // ── Project memory — persistent across sessions (Bug #3 + #5) ──
-  lines.push(...renderProjectMemory(report.projectMemory, { lifetime }));
+  lines.push(...renderProjectMemory(report.projectMemory, { lifetime, sessionTokensSaved: tokensSaved }));
 
   // ── Auto-memory — Claude Code's preference learnings (Bug #4) ──
   lines.push(...renderAutoMemory(lifetime));
