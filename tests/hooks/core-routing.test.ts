@@ -683,7 +683,7 @@ describe("routePreToolUse", () => {
     });
   });
 
-  describe("Codex context-mode MCP execute security", () => {
+  describe("non-Codex context-mode MCP execute security", () => {
     let projectDir: string;
 
     beforeAll(async () => {
@@ -712,13 +712,13 @@ describe("routePreToolUse", () => {
       ["ctx_batch_execute", { commands: [{ label: "bad", command: "sudo whoami" }] }],
       ["mcp__other__ctx_batch_execute", { commands: [{ label: "bad", command: "sudo whoami" }] }],
     ])("denies shell policy matches for %s", (toolName, toolInput) => {
-      const result = routePreToolUse(toolName, toolInput, projectDir);
+      const result = routePreToolUse(toolName, toolInput, projectDir, "claude-code");
       expect(result?.action).toBe("deny");
       expect(result?.reason).toContain("deny pattern");
     });
   });
 
-  describe("Codex exec_command security policy", () => {
+  describe("Codex hook routing defers to the native sandbox (#944)", () => {
     let projectDir: string;
     let homeDir: string;
     let codexDir: string;
@@ -735,9 +735,15 @@ describe("routePreToolUse", () => {
       homeDir = mkdtempSync(join(tmpdir(), "ctx-codex-home-"));
       codexDir = join(homeDir, ".codex");
       mkdirSync(codexDir, { recursive: true });
+      mkdirSync(join(projectDir, ".claude"), { recursive: true });
       writeFileSync(
         join(codexDir, "settings.json"),
-        JSON.stringify({ permissions: { deny: ["Bash(echo blocked)"] } }),
+        JSON.stringify({ permissions: { deny: ["Bash(echo blocked)", "Read(secret.txt)"] } }),
+        "utf-8",
+      );
+      writeFileSync(
+        join(projectDir, ".claude", "settings.local.json"),
+        JSON.stringify({ permissions: { deny: ["Bash(echo blocked)", "Read(secret.txt)"] } }),
         "utf-8",
       );
       previousHome = process.env.HOME;
@@ -759,7 +765,7 @@ describe("routePreToolUse", () => {
       try { rmSync(homeDir, { recursive: true, force: true }); } catch {}
     });
 
-    it("denies Codex exec_command cmd payloads from .codex settings", () => {
+    it("ignores $CODEX_HOME/settings.json and co-installed Claude JSON for exec_command", () => {
       const result = routePreToolUse(
         "exec_command",
         { cmd: "echo blocked" },
@@ -767,8 +773,18 @@ describe("routePreToolUse", () => {
         "codex",
         "codex-cmd-policy",
       );
-      expect(result?.action).toBe("deny");
-      expect(result?.reason).toContain("deny pattern");
+      expect(result).toBeNull();
+    });
+
+    it("ignores Claude-shaped Read and Bash policies for ctx_execute_file", () => {
+      const result = routePreToolUse(
+        "ctx_execute_file",
+        { path: "secret.txt", language: "shell", code: "echo blocked" },
+        projectDir,
+        "codex",
+        "codex-file-policy",
+      );
+      expect(result).toBeNull();
     });
   });
 

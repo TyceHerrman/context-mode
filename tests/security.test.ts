@@ -756,6 +756,7 @@ describe("CLAUDE_CONFIG_DIR honors security policy reader", () => {
   let savedEnv: string | undefined;
   let savedHome: string | undefined;
   let savedUserprofile: string | undefined;
+  let savedPlatform: string | undefined;
 
   beforeAll(() => {
     cfgTmpBase = join(tmpdir(), `security-cfg-test-${Date.now()}`);
@@ -793,8 +794,10 @@ describe("CLAUDE_CONFIG_DIR honors security policy reader", () => {
     savedEnv = process.env.CLAUDE_CONFIG_DIR;
     savedHome = process.env.HOME;
     savedUserprofile = process.env.USERPROFILE;
+    savedPlatform = process.env.CONTEXT_MODE_PLATFORM;
     process.env.HOME = fakeHome;
     process.env.USERPROFILE = fakeHome;
+    process.env.CONTEXT_MODE_PLATFORM = "claude-code";
   });
 
   afterAll(() => {
@@ -804,6 +807,8 @@ describe("CLAUDE_CONFIG_DIR honors security policy reader", () => {
     else process.env.HOME = savedHome;
     if (savedUserprofile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = savedUserprofile;
+    if (savedPlatform === undefined) delete process.env.CONTEXT_MODE_PLATFORM;
+    else process.env.CONTEXT_MODE_PLATFORM = savedPlatform;
     rmSync(cfgTmpBase, { recursive: true, force: true });
   });
 
@@ -859,7 +864,7 @@ describe("CLAUDE_CONFIG_DIR honors security policy reader", () => {
  * Issue #451 round-3 — cross-adapter deny-policy parity.
  *
  * `resolveClaudeGlobalSettingsPath` hardcoded the `.claude` segment, so
- * non-Claude adapters (Cursor, Codex, Qwen, Gemini, JetBrains, VS Code, etc.)
+ * non-Claude adapters (Cursor, Qwen, Gemini, JetBrains, VS Code, etc.)
  * received zero file-deny enforcement: their global settings.json (e.g.
  * ~/.cursor/settings.json) was never consulted by `readBashPolicies` or
  * `readToolDenyPatterns`. This is a cross-adapter security parity gap.
@@ -875,7 +880,6 @@ describe("CLAUDE_CONFIG_DIR honors security policy reader", () => {
 describe("cross-adapter deny-policy parity (#451 round-3)", () => {
   const ADAPTER_SEGMENTS: ReadonlyArray<readonly [string, readonly string[]]> = [
     ["cursor",            [".cursor"]],
-    ["codex",             [".codex"]],
     ["qwen-code",         [".qwen"]],
     ["gemini-cli",        [".gemini"]],
     ["jetbrains-copilot", [".config", "JetBrains"]],
@@ -887,6 +891,7 @@ describe("cross-adapter deny-policy parity (#451 round-3)", () => {
   let savedUserprofile: string | undefined;
   let savedPlatform: string | undefined;
   let savedClaudeConfig: string | undefined;
+  let savedCodexHome: string | undefined;
 
   beforeAll(() => {
     parityTmpBase = join(tmpdir(), `security-parity-test-${Date.now()}`);
@@ -895,6 +900,7 @@ describe("cross-adapter deny-policy parity (#451 round-3)", () => {
     savedUserprofile = process.env.USERPROFILE;
     savedPlatform = process.env.CONTEXT_MODE_PLATFORM;
     savedClaudeConfig = process.env.CLAUDE_CONFIG_DIR;
+    savedCodexHome = process.env.CODEX_HOME;
   });
 
   afterAll(() => {
@@ -906,6 +912,8 @@ describe("cross-adapter deny-policy parity (#451 round-3)", () => {
     else process.env.CONTEXT_MODE_PLATFORM = savedPlatform;
     if (savedClaudeConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
     else process.env.CLAUDE_CONFIG_DIR = savedClaudeConfig;
+    if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = savedCodexHome;
     rmSync(parityTmpBase, { recursive: true, force: true });
   });
 
@@ -961,6 +969,36 @@ describe("cross-adapter deny-policy parity (#451 round-3)", () => {
       );
     });
   }
+
+  test("Codex ignores $CODEX_HOME and co-installed Claude JSON policies (#944)", () => {
+    const fakeHome = join(parityTmpBase, "codex-native-policy-home");
+    const codexDir = join(fakeHome, ".codex");
+    const claudeDir = join(fakeHome, ".claude");
+    mkdirSync(codexDir, { recursive: true });
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(
+      join(codexDir, "settings.json"),
+      JSON.stringify({ permissions: { deny: ["Bash(codex-json *)", "Read(codex-secret)"] } }),
+    );
+    writeFileSync(
+      join(claudeDir, "settings.json"),
+      JSON.stringify({ permissions: { deny: ["Bash(claude-json *)", "Read(claude-secret)"] } }),
+    );
+
+    process.env.HOME = fakeHome;
+    process.env.USERPROFILE = fakeHome;
+    process.env.CODEX_HOME = codexDir;
+    process.env.CLAUDE_CONFIG_DIR = claudeDir;
+    process.env.CONTEXT_MODE_PLATFORM = "codex";
+
+    const policies = readBashPolicies();
+    const allDeny = policies.flatMap((policy) => policy.deny);
+    assert.ok(!allDeny.includes("Bash(codex-json *)"));
+    assert.ok(!allDeny.includes("Bash(claude-json *)"));
+    const readDeny = readToolDenyPatterns("Read").flat();
+    assert.ok(!readDeny.includes("codex-secret"));
+    assert.ok(!readDeny.includes("claude-secret"));
+  });
 
   test("union semantics: claude global is also read when non-claude adapter active", () => {
     const fakeHome = join(parityTmpBase, "union-home");

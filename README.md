@@ -673,6 +673,8 @@ The Codex plugin manifest provides MCP via `.codex-plugin/mcp.json`, skills via
    > **Note:** Codex PreToolUse routing currently supports deny rules only (blocks dangerous commands). It still needs upstream `updatedInput` support before context-mode can rewrite tool input; track [openai/codex#18491](https://github.com/openai/codex/issues/18491). Context injection (`additionalContext`) is not supported in Codex PreToolUse — it works via PostToolUse and SessionStart instead. This is handled automatically.
    >
    > `PreCompact` support is runtime-gated: it is present in Codex CLI 0.130.0, while the public Codex hooks docs may lag the shipped hook-event list. Older Codex builds that do not emit `PreCompact` will not create pre-compaction snapshots.
+   >
+   > **`ctx_execute_file` sandbox policy:** Codex CLI 0.143.0 and newer supplies its effective per-turn sandbox state to context-mode over MCP. context-mode probes every requested path through that native sandbox, including paths inside the project, and reads only after a successful probe. Older Codex builds remain confined to the project. No extra context-mode setting is required; `$CODEX_HOME/settings.json`, co-installed Claude JSON policy, and Claude-style `permissions.allow` are not Codex policy sources. Non-Codex clients keep the existing `permissions.allow Read(...)` behavior.
 
 4. Copy routing instructions (recommended even with hooks for full routing awareness):
 

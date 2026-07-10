@@ -24,6 +24,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 import {
+  resolveAdapterGlobalSettingsPaths,
   resolveClaudeConfigDir,
   resolveClaudeGlobalSettingsPath,
 } from "../../src/util/claude-config.js";
@@ -96,5 +97,35 @@ describe("resolveClaudeConfigDir — CLAUDE_CONFIG_DIR contract", () => {
       resolveClaudeGlobalSettingsPath(),
       resolve(homedir(), ".claude", "settings.json"),
     );
+  });
+});
+
+describe("resolveAdapterGlobalSettingsPaths — effective Codex sandbox policy (#944)", () => {
+  const savedPlatform = process.env.CONTEXT_MODE_PLATFORM;
+
+  afterAll(() => {
+    if (savedPlatform === undefined) delete process.env.CONTEXT_MODE_PLATFORM;
+    else process.env.CONTEXT_MODE_PLATFORM = savedPlatform;
+  });
+
+  test("Codex returns no Claude-shaped JSON policy paths", () => {
+    process.env.CONTEXT_MODE_PLATFORM = "codex";
+    const paths = resolveAdapterGlobalSettingsPaths({
+      CODEX_HOME: "/tmp/fake-codex-home",
+      CLAUDE_CONFIG_DIR: "/tmp/co-installed-claude",
+    });
+    assert.deepEqual(paths, []);
+  });
+
+  test("non-Codex adapters retain adapter-specific plus Claude fallback paths", () => {
+    process.env.CONTEXT_MODE_PLATFORM = "cursor";
+    const claudeDir = "/tmp/claude-policy-control";
+    const paths = resolveAdapterGlobalSettingsPaths({
+      CLAUDE_CONFIG_DIR: claudeDir,
+    });
+    assert.deepEqual(paths, [
+      resolve(homedir(), ".cursor", "settings.json"),
+      resolve(claudeDir, "settings.json"),
+    ]);
   });
 });

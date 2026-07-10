@@ -52,7 +52,8 @@ export function resolveClaudeGlobalSettingsPath(
  * security policy reader. This helper returns the union of:
  *
  *   1. The currently-detected adapter's home-rooted settings.json (when the
- *      adapter is non-claude — claude is already covered by entry 2).
+ *      adapter is non-claude and uses Claude-compatible JSON policy — claude
+ *      is already covered by entry 2).
  *   2. The claude global settings.json (always — defense in depth).
  *
  * Static import of `../adapters/detect.js` is safe — detect.ts only imports
@@ -77,6 +78,12 @@ export function resolveAdapterGlobalSettingsPaths(
   const paths: string[] = [];
 
   const detected = detectPlatform();
+
+  // Codex 0.143+ sends its effective, per-turn sandbox state over MCP. A
+  // `.codex/settings.json` file is not a real Codex policy source, and a
+  // co-installed Claude configuration must not override the native sandbox.
+  // Older Codex builds remain project-confined in the ctx_execute_file handler.
+  if (detected.platform === "codex") return [];
 
   if (detected.platform !== "claude-code") {
     const segments = getSessionDirSegments(detected.platform);

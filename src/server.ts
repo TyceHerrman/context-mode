@@ -145,10 +145,31 @@ export const server = new McpServer({
   version: VERSION,
 });
 
+export const CODEX_SANDBOX_STATE_META_KEY = "codex/sandbox-state-meta";
+
+/** Advertise support for Codex's opaque effective per-turn sandbox state. */
+export function registerCodexSandboxStateCapability(target: McpServer = server): void {
+  target.server.registerCapabilities({
+    experimental: { [CODEX_SANDBOX_STATE_META_KEY]: {} },
+  });
+}
+
+registerCodexSandboxStateCapability();
+
+export interface CtxToolHandlerExtra {
+  signal?: AbortSignal;
+  _meta?: Record<string, unknown>;
+}
+
+export type CtxToolHandler = (
+  args: Record<string, unknown>,
+  extra?: CtxToolHandlerExtra,
+) => Promise<unknown> | unknown;
+
 export interface RegisteredCtxTool {
   name: string;
   config: Record<string, unknown>;
-  handler: (args: Record<string, unknown>) => Promise<unknown> | unknown;
+  handler: CtxToolHandler;
 }
 
 export const REGISTERED_CTX_TOOLS: RegisteredCtxTool[] = [];
@@ -279,7 +300,7 @@ const originalRegisterTool = server.registerTool.bind(server);
   const [name, config, handler] = args as [
     string,
     Record<string, unknown>,
-    (toolArgs: Record<string, unknown>) => Promise<unknown> | unknown,
+    CtxToolHandler,
   ];
   if (suppressMcpToolsForNativePluginHost) {
     emitSuppressionDiagnostic();
@@ -291,17 +312,17 @@ const originalRegisterTool = server.registerTool.bind(server);
   return (originalRegisterTool as unknown as (...callArgs: unknown[]) => unknown)(...args);
 };
 
-function wrapToolHandler(
+export function wrapToolHandler(
   name: string,
-  handler: (toolArgs: Record<string, unknown>) => Promise<unknown> | unknown,
-): (toolArgs: Record<string, unknown>) => Promise<unknown> {
-  return async (toolArgs: Record<string, unknown>) => {
+  handler: CtxToolHandler,
+): (toolArgs: Record<string, unknown>, extra?: CtxToolHandlerExtra) => Promise<unknown> {
+  return async (toolArgs: Record<string, unknown>, extra?: CtxToolHandlerExtra) => {
     // #854: mark a tool call in-flight so the bridge-child idle reaper never
     // shuts the server down mid-execution during a long ctx_execute/batch that
     // emits no further inbound messages. Symmetric end in finally (success+error).
     noteRequestStart();
     try {
-      return await handler(toolArgs);
+      return await handler(toolArgs, extra);
     } catch (err) {
       const result = storageErrorResult(err);
       if (result) {
@@ -1208,6 +1229,128 @@ function checkProjectBoundary(
   return null;
 }
 
+export type CodexFileAccessDecision =
+  | { allowed: true; resolvedPath: string }
+  | { allowed: false; reason: string };
+
+const CODEX_SANDBOX_PROBE_TIMEOUT_MS = 5000;
+const CODEX_SANDBOX_READ_PROBE =
+  'import("node:fs").then(fs=>{const fd=fs.openSync(process.argv[1],"r");fs.closeSync(fd);});';
+
+function isPositivelyIdentifiedCodexClient(): boolean {
+  try {
+    const clientInfo = server.server.getClientVersion();
+    if (!clientInfo) return false;
+    const signal = detectPlatform(clientInfo);
+    return signal.platform === "codex" && signal.confidence === "high";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve and authorize a ctx_execute_file read for Codex.
+ *
+ * Codex 0.143+ provides the effective sandbox state for the current turn in
+ * the SDK callback metadata. The state is deliberately opaque here: context-
+ * mode passes it back to `codex sandbox` and trusts only the probe exit status.
+ * This keeps TOML/config interpretation in Codex, where the effective policy is
+ * already computed. Older Codex builds remain project-confined.
+ *
+ * Returns null for non-Codex clients so the existing Claude-compatible
+ * permissions.allow / deny-policy path remains unchanged.
+ */
+export function authorizeCodexExecuteFilePath(
+  filePath: string,
+  extra: CtxToolHandlerExtra | undefined,
+  options: {
+    codexClient?: boolean;
+    projectDir?: string;
+    runner?: SpawnSyncFn;
+  } = {},
+): CodexFileAccessDecision | null {
+  const codexClient = options.codexClient ?? isPositivelyIdentifiedCodexClient();
+  if (!codexClient) return null;
+
+  const projectDir = options.projectDir ?? getProjectDir();
+  const resolvedPath = resolve(projectDir, filePath);
+  const meta = extra?._meta;
+  const hasSandboxState = !!meta && Object.prototype.hasOwnProperty.call(
+    meta,
+    CODEX_SANDBOX_STATE_META_KEY,
+  );
+
+  if (!hasSandboxState) {
+    // Compatibility for older Codex builds: no external reads, and no JSON
+    // policy escape hatch. Lexical + realpath/symlink containment is shared
+    // with the existing project-boundary guard.
+    const containment = evaluateProjectContainment(filePath, projectDir, []);
+    if (containment.allowed) return { allowed: true, resolvedPath };
+    return {
+      allowed: false,
+      reason:
+        `File access blocked: "${filePath}" resolves outside the project root (${projectDir}). ` +
+        `This Codex client did not provide effective sandbox metadata. Upgrade to a current ` +
+        `Codex build (0.143 or newer) to authorize sandbox-readable external files.`,
+    };
+  }
+
+  const sandboxState = meta[CODEX_SANDBOX_STATE_META_KEY];
+  if (
+    sandboxState === null ||
+    typeof sandboxState !== "object" ||
+    Array.isArray(sandboxState)
+  ) {
+    return {
+      allowed: false,
+      reason: "Codex sandbox metadata is malformed; refusing file access.",
+    };
+  }
+
+  let serializedState: string;
+  try {
+    serializedState = JSON.stringify(sandboxState);
+    if (!serializedState) throw new Error("empty sandbox state");
+  } catch {
+    return {
+      allowed: false,
+      reason: "Codex sandbox metadata could not be serialized; refusing file access.",
+    };
+  }
+
+  const runner = options.runner ?? spawnSync;
+  try {
+    const probe = runner(
+      "codex",
+      [
+        "sandbox",
+        "--sandbox-state-json",
+        serializedState,
+        process.execPath,
+        "-e",
+        CODEX_SANDBOX_READ_PROBE,
+        resolvedPath,
+      ],
+      {
+        shell: false,
+        stdio: "ignore",
+        timeout: CODEX_SANDBOX_PROBE_TIMEOUT_MS,
+      },
+    );
+    if (!probe.error && probe.status === 0) {
+      return { allowed: true, resolvedPath };
+    }
+  } catch {
+    // Fail closed. Missing CLI, timeout, and spawn failures are all inability
+    // to prove that the effective Codex sandbox permits this read.
+  }
+
+  return {
+    allowed: false,
+    reason: `Codex sandbox denied or could not verify read access to "${resolvedPath}".`,
+  };
+}
+
 /**
  * Check a file path against Read deny patterns.
  * Returns an error ToolResult if denied, or null if allowed.
@@ -2111,30 +2254,45 @@ EXAMPLE: ctx_execute_file(path: "data.csv", language: "javascript", code: "const
         ),
     }),
   },
-  async ({ path, language, code, timeout, intent }) => {
-    // Security (#852): confine the processed file to the project root so
-    // ctx_execute_file cannot be used to escape the host's sandbox/permission
-    // controls. Runs before the deny-glob check — boundary first, then policy.
-    const boundaryDenied = checkProjectBoundary(path, "ctx_execute_file");
-    if (boundaryDenied) return boundaryDenied;
+  async ({ path, language, code, timeout, intent }, extra) => {
+    const codexAccess = authorizeCodexExecuteFilePath(path, extra);
+    let executionPath = path;
 
-    // Security: check file path against Read deny patterns
-    const pathDenied = checkFilePathDenyPolicy(path, "ctx_execute_file");
-    if (pathDenied) return pathDenied;
-
-    // Security: check code parameter against Bash deny patterns
-    if (language === "shell") {
-      const codeDenied = checkDenyPolicy(code, "execute_file");
-      if (codeDenied) return codeDenied;
+    if (codexAccess) {
+      if (!codexAccess.allowed) {
+        return trackResponse("ctx_execute_file", {
+          content: [{ type: "text" as const, text: codexAccess.reason }],
+          isError: true,
+        });
+      }
+      // Use the same project-resolved absolute path that the native Codex
+      // sandbox probe approved.
+      executionPath = codexAccess.resolvedPath;
     } else {
-      const codeDenied = checkNonShellDenyPolicy(code, language, "execute_file");
-      if (codeDenied) return codeDenied;
+      // Security (#852): non-Codex hosts retain the Claude-compatible project
+      // boundary and permissions.allow escape hatch.
+      const boundaryDenied = checkProjectBoundary(path, "ctx_execute_file");
+      if (boundaryDenied) return boundaryDenied;
+
+      // Security: check file path against Read deny patterns.
+      const pathDenied = checkFilePathDenyPolicy(path, "ctx_execute_file");
+      if (pathDenied) return pathDenied;
+
+      // Security: check code parameter against Bash deny patterns. Codex skips
+      // this JSON-policy path because its effective sandbox is authoritative.
+      if (language === "shell") {
+        const codeDenied = checkDenyPolicy(code, "execute_file");
+        if (codeDenied) return codeDenied;
+      } else {
+        const codeDenied = checkNonShellDenyPolicy(code, language, "execute_file");
+        if (codeDenied) return codeDenied;
+      }
     }
 
     try {
       const effTimeout = resolveExecTimeout(timeout);
       const result = await executor.executeFile({
-        path,
+        path: executionPath,
         language,
         code,
         timeout: effTimeout,

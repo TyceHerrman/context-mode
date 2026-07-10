@@ -44,7 +44,16 @@ import {
   StorageDirectoryError,
 } from "../../src/session/db.js";
 import { ROUTING_BLOCK } from "../../hooks/routing-block.mjs";
-import { sanitizeSchemaForStrictClients, resolveExecTimeout, AGY_DEFAULT_EXEC_TIMEOUT_MS, REGISTERED_CTX_TOOLS } from "../../src/server.js";
+import {
+  AGY_DEFAULT_EXEC_TIMEOUT_MS,
+  CODEX_SANDBOX_STATE_META_KEY,
+  REGISTERED_CTX_TOOLS,
+  authorizeCodexExecuteFilePath,
+  registerCodexSandboxStateCapability,
+  resolveExecTimeout,
+  sanitizeSchemaForStrictClients,
+  wrapToolHandler,
+} from "../../src/server.js";
 import { stripJsonComments, parseJsonc } from "../../src/util/jsonc.js";
 
 // ─── Shared setup ───────────────────────────────────────────────────────────
@@ -57,6 +66,155 @@ afterEach(() => {
   if (savedStorageEnv === undefined) delete process.env[STORAGE_ENV_KEY];
   else process.env[STORAGE_ENV_KEY] = savedStorageEnv;
   clearStorageDirectoryCheckCacheForTests();
+});
+
+describe("Codex effective sandbox metadata (#944)", () => {
+  const projectDir = resolve(tmpdir(), "ctx-codex-sandbox-project");
+  const sandboxState = {
+    permission_profile: { type: "workspace-write" },
+    sandbox_cwd: projectDir,
+  };
+
+  function fakeSpawn(
+    result: { status: number | null; error?: Error },
+    calls: Array<{ cmd: string; args: readonly string[]; opts: Record<string, unknown> }>,
+  ) {
+    return ((cmd: string, args: readonly string[], opts: Record<string, unknown>) => {
+      calls.push({ cmd, args, opts });
+      return {
+        pid: 0,
+        output: [],
+        stdout: null,
+        stderr: null,
+        status: result.status,
+        signal: null,
+        error: result.error,
+      };
+    }) as any;
+  }
+
+  test("advertises the codex/sandbox-state-meta experimental capability", () => {
+    let capabilities: Record<string, unknown> | undefined;
+    registerCodexSandboxStateCapability({
+      server: {
+        registerCapabilities(value: Record<string, unknown>) {
+          capabilities = value;
+        },
+      },
+    } as any);
+
+    expect(capabilities).toEqual({
+      experimental: { [CODEX_SANDBOX_STATE_META_KEY]: {} },
+    });
+  });
+
+  test("tool wrapper forwards the SDK callback extra object unchanged", async () => {
+    const controller = new AbortController();
+    const extra = {
+      signal: controller.signal,
+      _meta: { [CODEX_SANDBOX_STATE_META_KEY]: sandboxState },
+    };
+    let received: unknown;
+    const wrapped = wrapToolHandler("ctx_test", async (_args, callbackExtra) => {
+      received = callbackExtra;
+      return { content: [] };
+    });
+
+    await wrapped({}, extra);
+    expect(received).toBe(extra);
+    expect((received as typeof extra).signal).toBe(controller.signal);
+    expect((received as typeof extra)._meta).toBe(extra._meta);
+  });
+
+  test("uses argv-only codex sandbox probe and preserves opaque state and path characters", () => {
+    const calls: Array<{ cmd: string; args: readonly string[]; opts: Record<string, unknown> }> = [];
+    const requested = "dir with spaces/file;still-one-arg\\name.md";
+    const result = authorizeCodexExecuteFilePath(
+      requested,
+      { _meta: { [CODEX_SANDBOX_STATE_META_KEY]: sandboxState } },
+      { codexClient: true, projectDir, runner: fakeSpawn({ status: 0 }, calls) },
+    );
+
+    expect(result).toEqual({ allowed: true, resolvedPath: resolve(projectDir, requested) });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.cmd).toBe("codex");
+    expect(calls[0]?.args.slice(0, 3)).toEqual([
+      "sandbox",
+      "--sandbox-state-json",
+      JSON.stringify(sandboxState),
+    ]);
+    expect(calls[0]?.args.at(-1)).toBe(resolve(projectDir, requested));
+    expect(calls[0]?.opts).toMatchObject({ shell: false, stdio: "ignore", timeout: 5000 });
+  });
+
+  test("probes in-project paths when metadata is present", () => {
+    const calls: Array<{ cmd: string; args: readonly string[]; opts: Record<string, unknown> }> = [];
+    const result = authorizeCodexExecuteFilePath(
+      "README.md",
+      { _meta: { [CODEX_SANDBOX_STATE_META_KEY]: sandboxState } },
+      { codexClient: true, projectDir, runner: fakeSpawn({ status: 0 }, calls) },
+    );
+    expect(result.allowed).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+
+  test.each([
+    ["sandbox denial", { status: 1, error: undefined }],
+    ["missing Codex CLI", { status: null, error: Object.assign(new Error("ENOENT"), { code: "ENOENT" }) }],
+    ["probe timeout", { status: null, error: Object.assign(new Error("ETIMEDOUT"), { code: "ETIMEDOUT" }) }],
+  ])("fails closed on %s", (_label, spawnResult) => {
+    const result = authorizeCodexExecuteFilePath(
+      "README.md",
+      { _meta: { [CODEX_SANDBOX_STATE_META_KEY]: sandboxState } },
+      { codexClient: true, projectDir, runner: fakeSpawn(spawnResult, []) },
+    );
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toMatch(/Codex sandbox/i);
+  });
+
+  test("fails closed on malformed or unserializable metadata without spawning", () => {
+    const calls: Array<{ cmd: string; args: readonly string[]; opts: Record<string, unknown> }> = [];
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    const runner = fakeSpawn({ status: 0 }, calls);
+
+    for (const state of ["not-an-object", null, [], circular]) {
+      const result = authorizeCodexExecuteFilePath(
+        "README.md",
+        { _meta: { [CODEX_SANDBOX_STATE_META_KEY]: state } },
+        { codexClient: true, projectDir, runner },
+      );
+      expect(result.allowed).toBe(false);
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  test("older Codex stays project-confined and asks for a current Codex on external reads", () => {
+    const inside = authorizeCodexExecuteFilePath(
+      "README.md",
+      {},
+      { codexClient: true, projectDir, runner: fakeSpawn({ status: 0 }, []) },
+    );
+    expect(inside).toEqual({ allowed: true, resolvedPath: resolve(projectDir, "README.md") });
+
+    const outside = authorizeCodexExecuteFilePath(
+      resolve(projectDir, "..", "outside.md"),
+      {},
+      { codexClient: true, projectDir, runner: fakeSpawn({ status: 0 }, []) },
+    );
+    expect(outside.allowed).toBe(false);
+    expect(outside.reason).toMatch(/upgrade|current Codex/i);
+    expect(outside.reason).not.toContain("permissions.allow");
+  });
+
+  test("non-Codex clients stay on the existing policy path", () => {
+    const result = authorizeCodexExecuteFilePath(
+      resolve(projectDir, "..", "outside.md"),
+      { _meta: { [CODEX_SANDBOX_STATE_META_KEY]: sandboxState } },
+      { codexClient: false, projectDir, runner: fakeSpawn({ status: 0 }, []) },
+    );
+    expect(result).toBeNull();
+  });
 });
 
 describe("storage path resolution", () => {
