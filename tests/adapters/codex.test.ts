@@ -927,6 +927,25 @@ args = ["-y", "context-mode"]
   });
 });
 
+describe("Codex curl/wget routing guidance", () => {
+  it("allows only silent file-output commands and keeps textual responses in context-mode", () => {
+    const instructions = readFileSync(
+      resolve(__dirname, "../../configs/codex/AGENTS.md"),
+      "utf-8",
+    );
+
+    expect(instructions).toContain("### curl / wget — FILE OUTPUT ONLY");
+    expect(instructions).toContain("each curl/wget command segment is silent");
+    expect(instructions).toContain("writes output to a file");
+    expect(instructions).toContain("has no verbose/trace flags");
+    expect(instructions).toContain("does not target stdout");
+    expect(instructions).toContain("For textual HTTP responses");
+    expect(instructions).toContain("ctx_fetch_and_index(url, source)");
+    expect(instructions).toContain("ctx_execute(language, code)");
+    expect(instructions).not.toContain("### curl / wget — FORBIDDEN");
+  });
+});
+
 // ── Hook script integration tests ──────────────────────
 describe("Codex pretooluse hook script", () => {
   it("outputs valid JSON with hookEventName even for passthrough (no routing match)", () => {

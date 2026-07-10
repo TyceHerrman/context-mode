@@ -8,9 +8,9 @@ Analyze/count/filter/compare/search/parse/transform data: **write code** via `ct
 
 ## BLOCKED — do NOT use
 
-### curl / wget — FORBIDDEN
-Do NOT use `curl`/`wget` in shell. Dumps raw HTTP into context.
-Use: `ctx_fetch_and_index(url, source)` or `ctx_execute(language: "javascript", code: "const r = await fetch(...)")`
+### curl / wget — FILE OUTPUT ONLY
+For textual HTTP responses, do not use shell `curl`/`wget`; use `ctx_fetch_and_index(url, source)` or `ctx_execute(language, code)` and return only a summary.
+Exception: allow shell `curl`/`wget` only when each curl/wget command segment is silent, writes output to a file, has no verbose/trace flags, and does not target stdout. Do not surface response bodies, credentials, or tokens.
 
 ### Inline HTTP — FORBIDDEN
 No `node -e "fetch(..."`, `python -c "requests.get(..."`. Bypasses sandbox.
